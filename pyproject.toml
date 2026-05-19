@@ -13,6 +13,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+concepts = [
+  "axiom-encode @ git+https://github.com/TheAxiomFoundation/axiom-encode.git",
+]
 dev = [
   "pytest>=8.0",
 ]

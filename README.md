@@ -20,6 +20,19 @@ Corpus scanning is not per-household work. Consumers should build or load a `Cor
 with its `CorpusIndex` once per corpus SHA, then reuse that indexed state across many
 `compose()` calls and engine executions.
 
+Consumers should import the library API directly rather than shelling out to the
+CLI:
+
+```python
+from axiom_compose import compose, load_corpus_from_roots, load_spec
+```
+
+The optional concept-registry integration uses `axiom-encode`:
+
+```bash
+python -m pip install ".[concepts]"
+```
+
 ## Architecture Rule
 
 No program-specific Python belongs in this repository. A composition decision must come from exactly one of:
@@ -30,4 +43,4 @@ No program-specific Python belongs in this repository. A composition decision mu
 
 If a needed rule does not fit, it belongs in the appropriate rulespec corpus with source provenance, or the program does not ship.
 
-See [docs/architecture.md](docs/architecture.md) and [docs/adding-a-program.md](docs/adding-a-program.md).
+See [docs/architecture.md](docs/architecture.md), [docs/adding-a-program.md](docs/adding-a-program.md), and [docs/migration-readiness.md](docs/migration-readiness.md).
