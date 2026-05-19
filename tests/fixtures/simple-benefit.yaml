@@ -1,0 +1,20 @@
+program: us/example-benefit
+period: 2026-01
+outputs:
+  - example_benefit
+scope:
+  federal:
+    - statutes/example/1
+    - regulations/example/2
+transformations:
+  - pattern: sum_terms
+    name: example_total_income
+    entity: Household
+    dtype: Money
+    unit: USD
+    period: Month
+    effective_from: '2026-01-01'
+    source: example fixture
+    terms:
+      - example_wages
+      - example_interest

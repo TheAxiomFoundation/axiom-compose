@@ -1,0 +1,13 @@
+program: us/fiit/ctc
+period: '2026'
+outputs:
+  - ctc_after_advance_payments
+  - refundable_ctc
+  - non_refundable_ctc
+scope:
+  federal:
+    - statutes/26/24
+    - statutes/26/24/d
+    - statutes/26/24/h
+    - statutes/26/152/c
+    - policies/irs/rev-proc-2025-32/child-tax-credit
