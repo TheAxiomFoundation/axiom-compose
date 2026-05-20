@@ -8,6 +8,9 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.13", "3.14"]
     steps:
       - uses: actions/checkout@v6.0.2
       - uses: actions/checkout@v6.0.2
@@ -19,10 +22,10 @@ jobs:
           repository: TheAxiomFoundation/axiom-rules-engine
           path: _axiom/axiom-rules-engine
       - uses: astral-sh/setup-uv@v8.1.0
-      - run: uv python install 3.13
-      - run: uv run --python 3.13 --extra dev ruff check src/ tests/
-      - run: uv run --python 3.13 --extra dev ruff format --check src/ tests/
-      - run: uv run --python 3.13 --extra dev --extra policyengine python -m pytest
+      - run: uv python install ${{ matrix.python-version }}
+      - run: uv run --python ${{ matrix.python-version }} --extra dev ruff check src/ tests/
+      - run: uv run --python ${{ matrix.python-version }} --extra dev ruff format --check src/ tests/
+      - run: uv run --python ${{ matrix.python-version }} --extra dev --extra policyengine python -m pytest
         env:
           AXIOM_RULESPEC_US_ROOT: ${{ github.workspace }}/_axiom/rulespec-us
           AXIOM_RULES_ENGINE_ROOT: ${{ github.workspace }}/_axiom/axiom-rules-engine
