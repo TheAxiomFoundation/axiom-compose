@@ -1,8 +1,11 @@
 # Migration Readiness
 
-This repo currently proves deterministic, program-agnostic composition and
-corpus-index discovery. It does not yet prove end-to-end migration for existing
-FIIT or SNAP consumers.
+This repo currently proves deterministic, program-agnostic composition,
+corpus-index discovery, and one simple real-corpus engine round trip:
+`tests/test_real_program_oasdi.py` composes the employee OASDI wage-tax rule
+from `rulespec-us`, compiles it with `axiom-rules-engine`, and runs a fixture
+case. It does not yet prove end-to-end migration for existing FIIT or SNAP
+consumers.
 
 ## Tracked Gaps
 
@@ -24,19 +27,19 @@ FIIT or SNAP consumers.
    `rulespec-us-co`. Until they land, the composer should not pretend to
    reproduce the current CO SNAP artifact.
 
-2. Add real-corpus golden tests.
+2. Broaden real-corpus golden tests.
 
-   Current golden coverage uses a synthetic fixture. Add tests that pin
-   `(real corpus SHA, spec)` to exact emitted YAML, for example EITC and CTC.
-   These tests should fail loudly when the rulespec corpus or composer behavior
-   drifts.
+   Current real-corpus golden coverage is the OASDI wage-tax smoke path. Add
+   tests that pin `(real corpus SHA, spec)` to exact emitted YAML for broader
+   surfaces, for example EITC and CTC. These tests should fail loudly when the
+   rulespec corpus or composer behavior drifts.
 
-3. Add engine round-trip tests.
+3. Broaden engine round-trip tests.
 
-   Current tests prove deterministic emission, not engine readiness. Add an
-   integration test that composes a real spec, compiles it with
-   `axiom-rules-engine`, runs a small fixture population or ECPS slice, and
-   compares to the current working path.
+   Current engine round-trip coverage proves only the simplest OASDI path. Add
+   integration tests that compose broader real specs, compile them with
+   `axiom-rules-engine`, run small fixture populations or ECPS slices, and
+   compare to the current working path.
 
 4. Keep CLI thin.
 
