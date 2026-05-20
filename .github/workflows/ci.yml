@@ -22,7 +22,7 @@ jobs:
       - run: uv python install 3.13
       - run: uv run --python 3.13 --extra dev ruff check src/ tests/
       - run: uv run --python 3.13 --extra dev ruff format --check src/ tests/
-      - run: uv run --python 3.13 --extra dev python -m pytest
+      - run: uv run --python 3.13 --extra dev --extra policyengine python -m pytest
         env:
           AXIOM_RULESPEC_US_ROOT: ${{ github.workspace }}/_axiom/rulespec-us
           AXIOM_RULES_ENGINE_ROOT: ${{ github.workspace }}/_axiom/axiom-rules-engine
