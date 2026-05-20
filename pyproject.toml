@@ -7,7 +7,7 @@ name = "axiom-compose"
 version = "0.1.0"
 description = "Deterministic, program-agnostic RuleSpec composition for Axiom."
 readme = "README.md"
-requires-python = ">=3.13"
+requires-python = "==3.14.*"
 dependencies = [
   "PyYAML>=6.0",
 ]
@@ -36,7 +36,7 @@ pythonpath = ["src"]
 
 [tool.ruff]
 line-length = 88
-target-version = "py313"
+target-version = "py314"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
