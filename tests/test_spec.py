@@ -4,7 +4,6 @@ import pytest
 
 from axiom_compose.spec import ProgramSpec, SpecError, load_spec
 
-
 FIXTURES = Path(__file__).with_name("fixtures")
 
 

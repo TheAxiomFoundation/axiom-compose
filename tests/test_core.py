@@ -3,7 +3,6 @@ from pathlib import Path
 from axiom_compose import CorpusState, RuleSpecModule, compose, load_spec
 from axiom_compose.core import dependency_closure
 
-
 ROOT = Path(__file__).parent
 
 

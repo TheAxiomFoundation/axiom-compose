@@ -1,5 +1,3 @@
-from pathlib import Path
-
 from axiom_compose import compose, load_corpus_from_roots, load_spec
 
 

@@ -127,7 +127,9 @@ def _base_rule(
     return rule
 
 
-def _string(parameters: Mapping[str, Any], key: str, *, default: str | None = None) -> str:
+def _string(
+    parameters: Mapping[str, Any], key: str, *, default: str | None = None
+) -> str:
     value = parameters.get(key, default)
     if not isinstance(value, str) or not value.strip():
         raise TransformationError(f"{key} must be a non-empty string")

@@ -152,7 +152,10 @@ def dependency_closure(
             visit(child)
         if corpus_state.index is None:
             return
-        reachable = (normalized, *_explicit_import_closure(module.imports, corpus_state))
+        reachable = (
+            normalized,
+            *_explicit_import_closure(module.imports, corpus_state),
+        )
         for identifier in corpus_state.index.consumed_by_target.get(normalized, ()):
             producer = _resolve_producer_in_context(
                 identifier,
@@ -418,8 +421,12 @@ def _resolve_producer_in_context(
     if not candidates:
         return None
     if len(candidates) > 1:
-        targets = ", ".join(item.target for item in sorted(candidates, key=lambda x: x.target))
-        raise ComposeError(f"ambiguous producers for {name!r} in import context: {targets}")
+        targets = ", ".join(
+            item.target for item in sorted(candidates, key=lambda x: x.target)
+        )
+        raise ComposeError(
+            f"ambiguous producers for {name!r} in import context: {targets}"
+        )
     return candidates[0]
 
 

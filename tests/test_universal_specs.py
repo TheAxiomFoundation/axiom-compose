@@ -4,7 +4,6 @@ import pytest
 
 from axiom_compose import CorpusState, compose, load_spec
 
-
 ROOT = Path(__file__).parent
 SRC = ROOT.parent / "src" / "axiom_compose"
 
