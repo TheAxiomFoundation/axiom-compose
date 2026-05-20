@@ -17,9 +17,7 @@ concepts = [
   "axiom-encode @ git+https://github.com/TheAxiomFoundation/axiom-encode.git",
 ]
 policyengine = [
-  "policyengine==4.4.4",
-  "policyengine-core==3.26.0",
-  "policyengine-us==1.691.3",
+  "policyengine[us]==4.9.0",
 ]
 dev = [
   "pytest>=8.0",

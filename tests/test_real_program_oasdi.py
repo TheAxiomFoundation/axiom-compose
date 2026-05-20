@@ -109,11 +109,11 @@ def _run_axiom_oasdi_case(tmp_path: Path) -> float:
 
 def _run_policyengine_oasdi_case() -> float:
     try:
-        from policyengine.tax_benefit_models.us import calculate_household
+        import policyengine as pe
     except ImportError as exc:
         pytest.skip(f"PolicyEngine is not installed: {exc}")
 
-    result = calculate_household(
+    result = pe.us.calculate_household(
         people=[
             {"age": 35, "employment_income": 1000, "is_tax_unit_head": True},
         ],
