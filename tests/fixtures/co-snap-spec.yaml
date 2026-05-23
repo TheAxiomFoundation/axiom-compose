@@ -1,0 +1,56 @@
+program: us-co/snap
+period: 2026-01
+outputs:
+  - snap_allotment
+  - snap_eligible
+scope:
+  federal:
+    - policies/usda/snap/fy-2026-cola/maximum-allotments
+    - policies/usda/snap/fy-2026-cola/deductions
+    - policies/usda/snap/fy-2026-cola/income-eligibility-standards
+    - regulations/7-cfr/273/3
+    - regulations/7-cfr/273/4
+    - regulations/7-cfr/273/6
+    - regulations/7-cfr/273/10
+    - statutes/7/2014/e/2
+    - statutes/7/2014/e/6/A
+    - statutes/7/2017/a
+    - regulations/7-cfr/273/24
+  state:
+    - regulations/10-ccr-2506-1/4.402
+    - regulations/10-ccr-2506-1/4.402.1
+    - regulations/10-ccr-2506-1/4.402.2
+    - regulations/10-ccr-2506-1/4.403.2
+    - regulations/10-ccr-2506-1/4.403.3
+    - regulations/10-ccr-2506-1/4.403.11
+    - regulations/10-ccr-2506-1/4.403.12
+    - regulations/10-ccr-2506-1/4.403
+    - regulations/10-ccr-2506-1/4.404
+    - regulations/10-ccr-2506-1/4.405
+    - regulations/10-ccr-2506-1/4.406
+    - regulations/10-ccr-2506-1/4.406.1
+    - regulations/10-ccr-2506-1/4.401.1
+    - regulations/10-ccr-2506-1/4.401.2
+    - regulations/10-ccr-2506-1/4.401
+    - regulations/10-ccr-2506-1/4.408.1
+    - regulations/10-ccr-2506-1/4.410
+    - regulations/10-ccr-2506-1/4.408
+    - regulations/10-ccr-2506-1/4.408.2
+    - regulations/10-ccr-2506-1/4.409
+    - regulations/10-ccr-2506-1/4.411
+    - regulations/10-ccr-2506-1/4.407.1
+    - regulations/10-ccr-2506-1/4.407.2
+    - regulations/10-ccr-2506-1/4.407.31
+    - regulations/10-ccr-2506-1/4.407.3
+    - regulations/10-ccr-2506-1/4.407.4
+    - regulations/10-ccr-2506-1/4.407.5
+    - regulations/10-ccr-2506-1/4.407.61
+    - regulations/10-ccr-2506-1/4.302
+    - regulations/10-ccr-2506-1/4.303
+    - regulations/10-ccr-2506-1/4.305
+    - regulations/10-ccr-2506-1/4.306
+    - regulations/10-ccr-2506-1/4.306.1
+    - regulations/10-ccr-2506-1/4.310
+    - regulations/10-ccr-2506-1/4.311
+    - regulations/10-ccr-2506-1/4.207.3
+    - regulations/10-ccr-2506-1/4.207.2

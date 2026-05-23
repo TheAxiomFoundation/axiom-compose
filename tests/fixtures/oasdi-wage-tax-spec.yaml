@@ -1,0 +1,4 @@
+program: us/payroll/oasdi-wage-tax
+period: '2026'
+outputs:
+  - oasdi_wage_tax

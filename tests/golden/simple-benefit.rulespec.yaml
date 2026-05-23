@@ -1,0 +1,18 @@
+format: rulespec/v1
+module:
+  kind: composition
+  summary: 'Deterministic composition for us/example-benefit at 2026-01. Outputs: example_benefit. Corpus: test-sha.'
+imports:
+- us:statutes/example/1
+- us:regulations/example/2
+rules:
+- name: example_total_income
+  kind: derived
+  entity: Household
+  dtype: Money
+  period: Month
+  source: example fixture
+  versions:
+  - effective_from: '2026-01-01'
+    formula: example_wages + example_interest
+  unit: USD

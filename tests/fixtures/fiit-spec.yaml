@@ -1,0 +1,24 @@
+program: us/fiit
+period: '2026'
+outputs:
+  - income_tax_before_credits
+  - income_tax_main_rates
+  - taxable_income
+  - eitc
+  - ctc_after_advance_payments
+scope:
+  federal:
+    - statutes/26/1/j
+    - statutes/26/24
+    - statutes/26/24/d
+    - statutes/26/32
+    - statutes/26/55
+    - statutes/26/63
+    - statutes/26/68/b
+    - statutes/26/86
+    - statutes/26/1401
+    - statutes/26/1411
+    - policies/irs/rev-proc-2025-32/income-tax-brackets
+    - policies/irs/rev-proc-2025-32/standard-deduction
+    - policies/irs/rev-proc-2025-32/child-tax-credit
+    - policies/irs/rev-proc-2025-32/earned-income-credit

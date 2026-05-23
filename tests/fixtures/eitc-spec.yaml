@@ -1,0 +1,12 @@
+program: us/fiit/eitc
+period: '2026'
+outputs:
+  - eitc
+  - eitc_allowed
+  - eitc_before_eligibility
+scope:
+  federal:
+    - statutes/26/32
+    - statutes/26/32/c/2
+    - statutes/26/152/c
+    - policies/irs/rev-proc-2025-32/earned-income-credit
