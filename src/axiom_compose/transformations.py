@@ -65,6 +65,60 @@ def any_related(parameters: Mapping[str, Any]) -> Rule:
     return _base_rule(parameters, name=name, dtype="Judgment", formula=formula)
 
 
+def derived_relation(parameters: Mapping[str, Any]) -> Rule:
+    """Create a derived_relation rule (filtered membership over a source relation).
+
+    The runtime semantics live in axiom-rules-engine: given a source relation
+    (e.g. member_of_household) and a per-member judgment, build a filtered
+    relation that downstream rules can scope to via `entity:`. The aggregations
+    `len`, `sum`, `count_where`, `sum_where` operate over filtered membership.
+
+    This pattern is program-agnostic: it accepts the source relation, the
+    filtered entity name, and the membership predicate as declarative
+    parameters. Use cases: SnapUnit filtered from member_of_household by a
+    SNAP eligibility predicate; qualifying-child set filtered from
+    dependents by a CTC predicate; MAGI household; etc.
+    """
+
+    name = _identifier(parameters, "name")
+    arity = _positive_int(parameters, "arity")
+    # source_relation may be a bare identifier (e.g. `member_of_household`) or
+    # a fully-qualified target (e.g. `us:statutes/7/2012/j#relation.member_of_household`);
+    # axiom-rules-engine resolves both forms — we accept either here.
+    source_relation = _string(parameters, "source_relation")
+    entity = _string(parameters, "entity")
+    member_relation = _identifier(parameters, "member_relation")
+    predicate = _identifier(parameters, "predicate")
+    slot_entities = _strings(parameters, "slot_entities")
+
+    effective_from = _string(parameters, "effective_from")
+    source = _string(
+        parameters,
+        "source",
+        default=f"axiom-compose:{parameters.get('pattern', 'derived_relation')}",
+    )
+
+    rule: Rule = {
+        "name": name,
+        "kind": "derived_relation",
+        "derived_relation": {
+            "arity": arity,
+            "source_relation": source_relation,
+            "entity": entity,
+            "member_relation": member_relation,
+            "slot_entities": list(slot_entities),
+        },
+        "source": source,
+        "versions": [
+            {
+                "effective_from": effective_from,
+                "formula": predicate,
+            }
+        ],
+    }
+    return rule
+
+
 def table_lookup_with_extension(parameters: Mapping[str, Any]) -> Rule:
     """Create a table lookup with a repeated additional-member extension."""
 
@@ -89,6 +143,7 @@ def table_lookup_with_extension(parameters: Mapping[str, Any]) -> Rule:
 PATTERNS: dict[str, Builder] = {
     "all_of": all_of,
     "any_related": any_related,
+    "derived_relation": derived_relation,
     "sum_terms": sum_terms,
     "table_lookup_with_extension": table_lookup_with_extension,
 }
@@ -148,6 +203,15 @@ def _identifiers(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, list | tuple):
         raise TransformationError(f"{key} must be a list of identifiers")
     return tuple(_identifier({key: item}, key) for item in value)
+
+
+def _strings(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """List of non-empty strings (e.g. slot_entities = [Person, Household])."""
+
+    value = parameters.get(key)
+    if isinstance(value, str) or not isinstance(value, list | tuple):
+        raise TransformationError(f"{key} must be a list of strings")
+    return tuple(_string({key: item}, key) for item in value)
 
 
 def _positive_int(parameters: Mapping[str, Any], key: str) -> int:
