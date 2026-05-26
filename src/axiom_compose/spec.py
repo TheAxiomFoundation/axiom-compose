@@ -31,6 +31,11 @@ class ProgramSpec:
     scope: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     rounding: str | None = None
     transformations: tuple[TransformationSpec, ...] = field(default_factory=tuple)
+    # Outputs whose eligibility-coverage check is intentionally disabled.
+    # Useful for bootstrap iterations that ship a deliberately partial
+    # eligibility chain. Each acknowledged output gets a compose warning
+    # but no error. Listed by output rule name (matches `outputs`).
+    acknowledged_incomplete: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ProgramSpec":
@@ -60,6 +65,12 @@ class ProgramSpec:
         if rounding is not None:
             rounding = _non_empty_string(rounding, "rounding")
 
+        acknowledged_incomplete = ()
+        if "acknowledged_incomplete" in raw:
+            acknowledged_incomplete = _string_tuple(
+                raw["acknowledged_incomplete"], "acknowledged_incomplete"
+            )
+
         return cls(
             program=program,
             period=period,
@@ -67,6 +78,7 @@ class ProgramSpec:
             scope=scope,
             rounding=rounding,
             transformations=transformations,
+            acknowledged_incomplete=acknowledged_incomplete,
         )
 
     def import_scopes(self) -> Mapping[str, tuple[str, ...]]:
@@ -97,6 +109,8 @@ class ProgramSpec:
                 {"pattern": item.pattern, **dict(item.parameters)}
                 for item in self.transformations
             ]
+        if self.acknowledged_incomplete:
+            payload["acknowledged_incomplete"] = list(self.acknowledged_incomplete)
         return payload
 
 
