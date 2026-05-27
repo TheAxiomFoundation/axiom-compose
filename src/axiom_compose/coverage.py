@@ -29,7 +29,6 @@ import re
 from collections.abc import Mapping
 from typing import Any, Iterable
 
-
 # Names that strongly suggest an "eligibility test" — what we expect a
 # declared eligibility concept to ultimately depend on. Mirrors the same
 # marker list that axiom_oracles.coverage uses so the two analyzers stay

@@ -4,12 +4,11 @@ from __future__ import annotations
 
 import pytest
 
+from axiom_compose.core import ComposeError, compose
 from axiom_compose.coverage import (
-    ELIGIBILITY_MARKERS,
     find_uncovered_eligibility_rules,
     format_coverage_error,
 )
-from axiom_compose.core import ComposeError, compose
 from axiom_compose.spec import ProgramSpec, TransformationSpec
 
 
