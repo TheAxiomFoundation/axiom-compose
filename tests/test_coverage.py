@@ -43,9 +43,7 @@ def test_transitive_references_credit_coverage() -> None:
             "snap_eligible", "snap_member_eligible and snap_income_eligible"
         ),
         "snap_member_eligible": _rule("snap_member_eligible", ""),
-        "snap_income_eligible": _rule(
-            "snap_income_eligible", "snap_asset_limit"
-        ),
+        "snap_income_eligible": _rule("snap_income_eligible", "snap_asset_limit"),
         "snap_asset_limit": _rule("snap_asset_limit", ""),
     }
     uncovered = find_uncovered_eligibility_rules(
@@ -75,7 +73,9 @@ def test_derived_relation_predicate_is_followed() -> None:
 
 
 def test_format_error_lists_rule_names() -> None:
-    msg = format_coverage_error("snap_eligible", ["snap_income_eligible", "snap_asset_limit"])
+    msg = format_coverage_error(
+        "snap_eligible", ["snap_income_eligible", "snap_asset_limit"]
+    )
     assert "snap_income_eligible" in msg
     assert "snap_asset_limit" in msg
     assert "acknowledged_incomplete" in msg

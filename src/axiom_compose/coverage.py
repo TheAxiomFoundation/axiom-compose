@@ -91,9 +91,7 @@ def find_uncovered_eligibility_rules(
     """
     reachable = _transitive_dependencies(output, rules_by_name)
     eligibility = {
-        name
-        for name in rules_by_name
-        if any(marker in name for marker in markers)
+        name for name in rules_by_name if any(marker in name for marker in markers)
     }
     return sorted(eligibility - reachable - {output})
 
