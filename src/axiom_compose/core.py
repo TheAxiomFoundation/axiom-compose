@@ -111,6 +111,13 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
         for item in spec.transformations
     ]
 
+    # Coverage assertion: walk each eligibility-shaped output and refuse to
+    # compose if there are atomic eligibility rules in scope the output
+    # silently ignores. Closes the "compose succeeds but engine returns
+    # over-permissive answer" trap that bit CA SNAP. Specs can opt out per
+    # output via `acknowledged_incomplete:` for honest bootstrap states.
+    _assert_eligibility_coverage(spec, corpus_state, imports, rules)
+
     payload: dict[str, Any] = {
         "format": "rulespec/v1",
         "module": {
@@ -126,6 +133,58 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     target = _program_target(spec.program, spec.period)
     source = _dump_yaml(payload)
     return RunnableProgram(target=target, payload=payload, source=source)
+
+
+def _assert_eligibility_coverage(
+    spec: ProgramSpec,
+    corpus_state: CorpusState,
+    imports: tuple[str, ...],
+    synthesized_rules: list[Mapping[str, Any]],
+) -> None:
+    """Raise ComposeError if any eligibility-shaped output silently drops
+    atomic eligibility rules that the imported corpus exposes."""
+    from .coverage import (
+        ELIGIBILITY_MARKERS,
+        find_uncovered_eligibility_rules,
+        format_coverage_error,
+    )
+
+    # Build the unified rule map: atomic rules from imported modules plus
+    # synthesized transformation rules. Both sides expose `versions`-with-
+    # formulas the analyzer understands.
+    rules_by_name: dict[str, Mapping[str, Any]] = {}
+    for target in imports:
+        module = corpus_state.modules.get(target)
+        if module is None:
+            continue
+        for rule in module.payload.get("rules") or ():
+            if not isinstance(rule, Mapping):
+                continue
+            name = rule.get("name")
+            if isinstance(name, str) and name and name not in rules_by_name:
+                rules_by_name[name] = rule
+    for rule in synthesized_rules:
+        name = rule.get("name")
+        if isinstance(name, str) and name:
+            # Synthesized rules win over corpus rules of the same name —
+            # they're the program-level override.
+            rules_by_name[name] = rule
+
+    acknowledged = set(spec.acknowledged_incomplete)
+    for output in spec.outputs:
+        if output in acknowledged:
+            continue
+        if not any(marker in output for marker in ELIGIBILITY_MARKERS):
+            continue
+        if output not in rules_by_name:
+            # The outputs-against-registry check upstream will already
+            # have errored on undefined outputs; skip silently here.
+            continue
+        uncovered = find_uncovered_eligibility_rules(
+            output=output, rules_by_name=rules_by_name
+        )
+        if uncovered:
+            raise ComposeError(format_coverage_error(output, uncovered))
 
 
 def dependency_closure(
