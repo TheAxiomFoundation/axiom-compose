@@ -199,3 +199,87 @@ def test_auto_gate_excludes_unrelated_program_eligibility_rules():
     assert "snap_resource_eligible" in formula  # in-program household gate
     assert "ctc_refundable_foreign_income_eligible" not in formula  # wrong program
     assert "legal_noncitizen_eligible_for_cfap" not in formula  # not a gate pattern
+
+
+def test_auto_gate_includes_state_namespaced_program_rules():
+    """State rulespecs name their gates with the state code prefix
+    (e.g. ``ny_snap_categorically_eligible``). Auto-gate must recognize
+    those as belonging to the SNAP program so they get AND-gated into
+    ``snap_eligible`` — otherwise the dashboard sees the same over-
+    permissive failure mode that bit CA SNAP, just at the state layer.
+
+    Live failure 2026-05-28: NY SNAP bootstrap returned 100% eligible
+    vs PolicyEngine 29.8% because 9 ``ny_snap_*_eligible`` rules in
+    scope were rejected by the prefix-only filter."""
+    from axiom_compose.spec import ProgramSpec, TransformationSpec
+
+    spec = ProgramSpec(
+        program="us-ny/snap",
+        period="2026-01",
+        outputs=("snap_eligible",),
+        scope={"federal": ("statutes/x/1",)},
+        transformations=(
+            TransformationSpec(
+                pattern="all_of",
+                parameters={
+                    "name": "snap_eligible",
+                    "effective_from": "2026-01-01",
+                    "entity": "Household",
+                    "dtype": "Judgment",
+                    "period": "Month",
+                    "source": "us:statutes/x/1",
+                    "conditions": ["snap_member_eligible"],
+                },
+            ),
+        ),
+        auto_gate_outputs=("snap_eligible",),
+    )
+    corpus = CorpusState(
+        modules={
+            "us:statutes/x/1": RuleSpecModule(
+                target="us:statutes/x/1",
+                payload={
+                    "rules": [
+                        {
+                            "name": "snap_member_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        # Federal gate — same shape as before, must gate.
+                        {
+                            "name": "snap_income_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        # State-namespaced SNAP gate — the new case.
+                        {
+                            "name": "ny_snap_categorically_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        # TANF rule that depends on SNAP cross-program —
+                        # must NOT be auto-gated into snap_eligible.
+                        {
+                            "name": "tanf_income_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                    ]
+                },
+            ),
+        },
+        corpus_sha="auto-gate-fixture",
+    )
+
+    program = compose(spec, corpus)
+    rules_by_name = {
+        rule["name"]: rule
+        for rule in program.payload["rules"]
+        if isinstance(rule, dict)
+    }
+    gate = rules_by_name["snap_eligible"]
+    formula = gate["versions"][0]["formula"]
+
+    assert "snap_income_eligible" in formula
+    assert "ny_snap_categorically_eligible" in formula
+    assert "tanf_income_eligible" not in formula
