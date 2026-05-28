@@ -31,6 +31,12 @@ class ProgramSpec:
     scope: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     rounding: str | None = None
     transformations: tuple[TransformationSpec, ...] = field(default_factory=tuple)
+    # Output rules to AND-gate with discovered uncovered eligibility-shaped
+    # rules from scope. Compose renames the original `<name>` rule to
+    # `<name>_core` and synthesizes a new `<name> = all_of(<name>_core, ...)`
+    # wrapping it with the discovered conditions. Removes the need to hand-
+    # list household income/resource gates in every state spec.
+    auto_gate_outputs: tuple[str, ...] = field(default_factory=tuple)
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ProgramSpec":
@@ -60,6 +66,16 @@ class ProgramSpec:
         if rounding is not None:
             rounding = _non_empty_string(rounding, "rounding")
 
+        raw_auto_gate = raw.get("auto_gate_outputs") or ()
+        auto_gate_outputs = (
+            _string_tuple(raw_auto_gate, "auto_gate_outputs") if raw_auto_gate else ()
+        )
+        unknown_auto_gate = [name for name in auto_gate_outputs if name not in outputs]
+        if unknown_auto_gate:
+            raise SpecError(
+                f"auto_gate_outputs not in outputs: {', '.join(unknown_auto_gate)}"
+            )
+
         return cls(
             program=program,
             period=period,
@@ -67,6 +83,7 @@ class ProgramSpec:
             scope=scope,
             rounding=rounding,
             transformations=transformations,
+            auto_gate_outputs=auto_gate_outputs,
         )
 
     def import_scopes(self) -> Mapping[str, tuple[str, ...]]:
