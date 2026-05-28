@@ -110,6 +110,7 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
         build_transformation(item.pattern, {"pattern": item.pattern, **item.parameters})
         for item in spec.transformations
     ]
+    rules = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
 
     # Coverage assertion: walk each eligibility-shaped output and refuse to
     # compose if there are atomic eligibility rules in scope the output
@@ -584,6 +585,95 @@ def _summary(spec: ProgramSpec, corpus_state: CorpusState) -> str:
         f"Deterministic composition for {spec.program} at {spec.period}. "
         f"Outputs: {outputs}. Corpus: {sha}."
     )
+
+
+def _apply_auto_gate_outputs(
+    spec: ProgramSpec,
+    corpus_state: CorpusState,
+    imports: tuple[str, ...],
+    rules: list[Mapping[str, Any]],
+) -> list[Mapping[str, Any]]:
+    """For each output in ``spec.auto_gate_outputs``, AND-gate the existing
+    rule with eligibility-shaped rules from scope that the output doesn't
+    reach. Rename the original rule to ``<name>_core`` and synthesize a new
+    ``<name> = all_of(<name>_core, ...discovered)`` wrapping it.
+
+    The discovered conditions come from a transitive-dependency walk over
+    the existing rule plus all imported corpus rules — only eligibility-
+    shaped rules that the original output does not already reach get
+    AND-gated in. Programs without ``auto_gate_outputs`` are unchanged.
+    """
+    if not spec.auto_gate_outputs:
+        return rules
+
+    rules_by_name: dict[str, Mapping[str, Any]] = {}
+    for target in imports:
+        module = corpus_state.modules.get(target)
+        if module is None:
+            continue
+        for rule in module.payload.get("rules") or ():
+            if not isinstance(rule, Mapping):
+                continue
+            name = rule.get("name")
+            if isinstance(name, str) and name and name not in rules_by_name:
+                rules_by_name[name] = rule
+    for rule in rules:
+        name = rule.get("name") if isinstance(rule, Mapping) else None
+        if isinstance(name, str) and name:
+            rules_by_name[name] = rule
+
+    new_rules: list[Mapping[str, Any]] = []
+    for rule in rules:
+        name = rule.get("name") if isinstance(rule, Mapping) else None
+        if not isinstance(name, str) or name not in spec.auto_gate_outputs:
+            new_rules.append(rule)
+            continue
+
+        from .coverage import find_uncovered_eligibility_rules
+
+        uncovered = find_uncovered_eligibility_rules(
+            output=name, rules_by_name=rules_by_name
+        )
+        # Restrict to rules sharing the original output's name prefix so we
+        # don't pull in unrelated programs' eligibility rules that happen
+        # to share the corpus root (e.g. CTC/EITC eligibility rules when
+        # gating SNAP). Prefix derived from the longest leading run of
+        # underscore-delimited segments shared with the output name.
+        prefix = _shared_name_prefix(name)
+        program_uncovered = [n for n in uncovered if prefix and n.startswith(prefix)]
+        if not program_uncovered:
+            new_rules.append(rule)
+            continue
+
+        core_name = f"{name}_core"
+        renamed_core = dict(rule)
+        renamed_core["name"] = core_name
+        new_rules.append(renamed_core)
+
+        # Synthesize the wrapper via the all_of pattern so the formula and
+        # metadata stay consistent with hand-written all_of transformations.
+        wrapper_params = {
+            "pattern": "all_of",
+            "name": name,
+            "entity": rule.get("entity", "Household"),
+            "dtype": rule.get("dtype", "Judgment"),
+            "period": rule.get("period", "Month"),
+            "source": rule.get("source", ""),
+            "conditions": [core_name, *program_uncovered],
+        }
+        effective_from = (rule.get("versions") or [{}])[0].get("effective_from")
+        if effective_from:
+            wrapper_params["effective_from"] = effective_from
+        new_rules.append(build_transformation("all_of", wrapper_params))
+
+    return new_rules
+
+
+def _shared_name_prefix(name: str) -> str:
+    """Return ``"<root>_"`` from a snake_case name (e.g. snap_eligible -> snap_)."""
+    if "_" not in name:
+        return ""
+    return name.split("_", 1)[0] + "_"
 
 
 def _dump_yaml(payload: Mapping[str, Any]) -> bytes:
