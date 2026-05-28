@@ -113,3 +113,89 @@ def test_auto_gate_wraps_output_with_uncovered_eligibility_rules():
     assert "widget_eligible_core" in formula
     assert "widget_income_eligible" in formula
     assert "widget_resource_eligible" in formula
+
+
+def test_auto_gate_excludes_unrelated_program_eligibility_rules():
+    """Auto-gate must only AND-in household-level gates that share the
+    output's program prefix. Otherwise gating SNAP would pull in CTC/EITC
+    `*_income_eligible` rules that happen to be in the same imported scope
+    (since SNAP and tax modules can share rulespec-us files).
+
+    Live failure 2026-05-28: naive auto-gate pulled 9 unrelated eligibility
+    rules into snap_eligible. Engine returned None for all 8 ECPS cases
+    because the foreign rules required inputs the SNAP program doesn't
+    expose, collapsing the AND-chain to None."""
+    from axiom_compose.spec import ProgramSpec, TransformationSpec
+
+    spec = ProgramSpec(
+        program="us-ca/snap",
+        period="2026-01",
+        outputs=("snap_eligible",),
+        scope={"federal": ("statutes/x/1",)},
+        transformations=(
+            TransformationSpec(
+                pattern="all_of",
+                parameters={
+                    "name": "snap_eligible",
+                    "effective_from": "2026-01-01",
+                    "entity": "Household",
+                    "dtype": "Judgment",
+                    "period": "Month",
+                    "source": "us:statutes/x/1",
+                    "conditions": ["snap_member_eligible"],
+                },
+            ),
+        ),
+        auto_gate_outputs=("snap_eligible",),
+    )
+    corpus = CorpusState(
+        modules={
+            "us:statutes/x/1": RuleSpecModule(
+                target="us:statutes/x/1",
+                payload={
+                    "rules": [
+                        {
+                            "name": "snap_member_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        # SNAP household gate — should be AND-gated.
+                        {
+                            "name": "snap_resource_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        # CTC eligibility rule that shares the imported
+                        # scope — must NOT be pulled into snap_eligible.
+                        {
+                            "name": "ctc_refundable_foreign_income_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        # A noncitizen-specific SNAP rule whose name doesn't
+                        # match the household-gate patterns — also a
+                        # conditional alternative, must NOT be auto-gated.
+                        {
+                            "name": "legal_noncitizen_eligible_for_cfap",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                    ]
+                },
+            ),
+        },
+        corpus_sha="auto-gate-fixture",
+    )
+
+    program = compose(spec, corpus)
+    rules_by_name = {
+        rule["name"]: rule
+        for rule in program.payload["rules"]
+        if isinstance(rule, dict)
+    }
+    gate = rules_by_name["snap_eligible"]
+    formula = gate["versions"][0]["formula"]
+
+    assert "snap_resource_eligible" in formula  # in-program household gate
+    assert "ctc_refundable_foreign_income_eligible" not in formula  # wrong program
+    assert "legal_noncitizen_eligible_for_cfap" not in formula  # not a gate pattern

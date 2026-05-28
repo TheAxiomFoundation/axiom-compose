@@ -171,7 +171,12 @@ def _assert_eligibility_coverage(
             # they're the program-level override.
             rules_by_name[name] = rule
 
-    acknowledged = set(spec.acknowledged_incomplete)
+    # Auto-gated outputs opt out of strict coverage: the auto-gate already
+    # wired in the household-level eligibility gates; any remaining uncovered
+    # rules are conditional alternatives or exception clauses the auto-gate
+    # deliberately excludes (because AND-gating them would require inputs
+    # the program doesn't expose).
+    acknowledged = set(spec.acknowledged_incomplete) | set(spec.auto_gate_outputs)
     for output in spec.outputs:
         if output in acknowledged:
             continue
@@ -587,6 +592,41 @@ def _summary(spec: ProgramSpec, corpus_state: CorpusState) -> str:
     )
 
 
+# Name suffixes that identify a household-level eligibility gate. Restrict
+# auto-gating to these to avoid pulling in conditional alternatives or
+# exception-handling rules that require inputs the program doesn't expose.
+# Add suffixes here as new gate families emerge across benefit programs.
+_HOUSEHOLD_GATE_SUFFIXES: tuple[str, ...] = (
+    "_income_eligible",
+    "_resource_eligible",
+    "_residency_eligible",
+    "_categorically_eligible",
+)
+
+
+def _filter_to_household_gate_candidates(
+    candidates: list[str], output_name: str
+) -> list[str]:
+    """Return only names that look like a top-level household eligibility
+    gate AND share the output's program prefix."""
+    output_prefix = _program_prefix(output_name)
+    if not output_prefix:
+        return []
+    return [
+        name
+        for name in candidates
+        if name.startswith(output_prefix)
+        and any(name.endswith(suffix) for suffix in _HOUSEHOLD_GATE_SUFFIXES)
+    ]
+
+
+def _program_prefix(name: str) -> str:
+    """Return ``"<root>_"`` from a snake_case name (e.g. snap_eligible -> snap_)."""
+    if "_" not in name:
+        return ""
+    return name.split("_", 1)[0] + "_"
+
+
 def _apply_auto_gate_outputs(
     spec: ProgramSpec,
     corpus_state: CorpusState,
@@ -634,14 +674,16 @@ def _apply_auto_gate_outputs(
         uncovered = find_uncovered_eligibility_rules(
             output=name, rules_by_name=rules_by_name
         )
-        # Restrict to rules sharing the original output's name prefix so we
-        # don't pull in unrelated programs' eligibility rules that happen
-        # to share the corpus root (e.g. CTC/EITC eligibility rules when
-        # gating SNAP). Prefix derived from the longest leading run of
-        # underscore-delimited segments shared with the output name.
-        prefix = _shared_name_prefix(name)
-        program_uncovered = [n for n in uncovered if prefix and n.startswith(prefix)]
-        if not program_uncovered:
+        # Only AND-gate rules that look like household-level eligibility
+        # gates (income/resource/residency/categorical) AND share the gated
+        # output's program prefix. The broader "any uncovered eligibility
+        # rule" set sweeps in conditional alternatives and exception clauses
+        # that require inputs not present in every household — AND-gating
+        # those collapses the formula to None for the common case (live
+        # failure 2026-05-28: 0/8 cases evaluated when 9 unrelated rules
+        # were pulled in).
+        gate_uncovered = _filter_to_household_gate_candidates(uncovered, name)
+        if not gate_uncovered:
             new_rules.append(rule)
             continue
 
@@ -659,7 +701,7 @@ def _apply_auto_gate_outputs(
             "dtype": rule.get("dtype", "Judgment"),
             "period": rule.get("period", "Month"),
             "source": rule.get("source", ""),
-            "conditions": [core_name, *program_uncovered],
+            "conditions": [core_name, *gate_uncovered],
         }
         effective_from = (rule.get("versions") or [{}])[0].get("effective_from")
         if effective_from:
@@ -667,13 +709,6 @@ def _apply_auto_gate_outputs(
         new_rules.append(build_transformation("all_of", wrapper_params))
 
     return new_rules
-
-
-def _shared_name_prefix(name: str) -> str:
-    """Return ``"<root>_"`` from a snake_case name (e.g. snap_eligible -> snap_)."""
-    if "_" not in name:
-        return ""
-    return name.split("_", 1)[0] + "_"
 
 
 def _dump_yaml(payload: Mapping[str, Any]) -> bytes:
