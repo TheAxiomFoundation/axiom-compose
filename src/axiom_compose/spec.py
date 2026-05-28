@@ -31,6 +31,11 @@ class ProgramSpec:
     scope: Mapping[str, tuple[str, ...]] = field(default_factory=dict)
     rounding: str | None = None
     transformations: tuple[TransformationSpec, ...] = field(default_factory=tuple)
+    # Outputs whose eligibility-coverage check is intentionally disabled.
+    # Useful for bootstrap iterations that ship a deliberately partial
+    # eligibility chain. Each acknowledged output gets a compose warning
+    # but no error. Listed by output rule name (matches `outputs`).
+    acknowledged_incomplete: tuple[str, ...] = field(default_factory=tuple)
     # Output rules to AND-gate with discovered uncovered eligibility-shaped
     # rules from scope. Compose renames the original `<name>` rule to
     # `<name>_core` and synthesizes a new `<name> = all_of(<name>_core, ...)`
@@ -66,6 +71,12 @@ class ProgramSpec:
         if rounding is not None:
             rounding = _non_empty_string(rounding, "rounding")
 
+        acknowledged_incomplete = ()
+        if "acknowledged_incomplete" in raw:
+            acknowledged_incomplete = _string_tuple(
+                raw["acknowledged_incomplete"], "acknowledged_incomplete"
+            )
+
         raw_auto_gate = raw.get("auto_gate_outputs") or ()
         auto_gate_outputs = (
             _string_tuple(raw_auto_gate, "auto_gate_outputs") if raw_auto_gate else ()
@@ -83,6 +94,7 @@ class ProgramSpec:
             scope=scope,
             rounding=rounding,
             transformations=transformations,
+            acknowledged_incomplete=acknowledged_incomplete,
             auto_gate_outputs=auto_gate_outputs,
         )
 
@@ -114,6 +126,8 @@ class ProgramSpec:
                 {"pattern": item.pattern, **dict(item.parameters)}
                 for item in self.transformations
             ]
+        if self.acknowledged_incomplete:
+            payload["acknowledged_incomplete"] = list(self.acknowledged_incomplete)
         return payload
 
 

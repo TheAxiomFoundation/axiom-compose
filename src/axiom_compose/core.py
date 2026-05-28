@@ -112,6 +112,13 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     ]
     rules = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
 
+    # Coverage assertion: walk each eligibility-shaped output and refuse to
+    # compose if there are atomic eligibility rules in scope the output
+    # silently ignores. Closes the "compose succeeds but engine returns
+    # over-permissive answer" trap that bit CA SNAP. Specs can opt out per
+    # output via `acknowledged_incomplete:` for honest bootstrap states.
+    _assert_eligibility_coverage(spec, corpus_state, imports, rules)
+
     payload: dict[str, Any] = {
         "format": "rulespec/v1",
         "module": {
@@ -127,6 +134,58 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     target = _program_target(spec.program, spec.period)
     source = _dump_yaml(payload)
     return RunnableProgram(target=target, payload=payload, source=source)
+
+
+def _assert_eligibility_coverage(
+    spec: ProgramSpec,
+    corpus_state: CorpusState,
+    imports: tuple[str, ...],
+    synthesized_rules: list[Mapping[str, Any]],
+) -> None:
+    """Raise ComposeError if any eligibility-shaped output silently drops
+    atomic eligibility rules that the imported corpus exposes."""
+    from .coverage import (
+        ELIGIBILITY_MARKERS,
+        find_uncovered_eligibility_rules,
+        format_coverage_error,
+    )
+
+    # Build the unified rule map: atomic rules from imported modules plus
+    # synthesized transformation rules. Both sides expose `versions`-with-
+    # formulas the analyzer understands.
+    rules_by_name: dict[str, Mapping[str, Any]] = {}
+    for target in imports:
+        module = corpus_state.modules.get(target)
+        if module is None:
+            continue
+        for rule in module.payload.get("rules") or ():
+            if not isinstance(rule, Mapping):
+                continue
+            name = rule.get("name")
+            if isinstance(name, str) and name and name not in rules_by_name:
+                rules_by_name[name] = rule
+    for rule in synthesized_rules:
+        name = rule.get("name")
+        if isinstance(name, str) and name:
+            # Synthesized rules win over corpus rules of the same name —
+            # they're the program-level override.
+            rules_by_name[name] = rule
+
+    acknowledged = set(spec.acknowledged_incomplete)
+    for output in spec.outputs:
+        if output in acknowledged:
+            continue
+        if not any(marker in output for marker in ELIGIBILITY_MARKERS):
+            continue
+        if output not in rules_by_name:
+            # The outputs-against-registry check upstream will already
+            # have errored on undefined outputs; skip silently here.
+            continue
+        uncovered = find_uncovered_eligibility_rules(
+            output=output, rules_by_name=rules_by_name
+        )
+        if uncovered:
+            raise ComposeError(format_coverage_error(output, uncovered))
 
 
 def dependency_closure(
@@ -570,7 +629,9 @@ def _apply_auto_gate_outputs(
             new_rules.append(rule)
             continue
 
-        uncovered = _find_uncovered_eligibility_rules(
+        from .coverage import find_uncovered_eligibility_rules
+
+        uncovered = find_uncovered_eligibility_rules(
             output=name, rules_by_name=rules_by_name
         )
         # Restrict to rules sharing the original output's name prefix so we
@@ -613,95 +674,6 @@ def _shared_name_prefix(name: str) -> str:
     if "_" not in name:
         return ""
     return name.split("_", 1)[0] + "_"
-
-
-# Eligibility-shaped name markers. Mirrors what axiom_oracles.coverage uses
-# so analyzers stay in sync. False positives (extra gates wired in) are
-# cheaper than silent gaps when the alternative is engine returns the wrong
-# answer.
-_ELIGIBILITY_MARKERS: tuple[str, ...] = (
-    "eligible",
-    "ineligible",
-    "income_limit",
-    "income_eligibility",
-    "asset_limit",
-    "resource_limit",
-    "residency",
-    "categorically_eligible",
-)
-
-_AUTO_GATE_FORMULA_KEYWORDS = frozenset(
-    {
-        "and",
-        "or",
-        "not",
-        "if",
-        "else",
-        "true",
-        "false",
-        "null",
-        "in",
-        "min",
-        "max",
-        "len",
-        "sum",
-        "count",
-        "count_where",
-        "sum_where",
-        "any",
-        "all",
-        "member_of_household",
-    }
-)
-
-
-def _find_uncovered_eligibility_rules(
-    *,
-    output: str,
-    rules_by_name: Mapping[str, Mapping[str, Any]],
-) -> list[str]:
-    """Eligibility-shaped rules in scope that ``output`` does not reach."""
-    reachable = _auto_gate_transitive_deps(output, rules_by_name)
-    eligibility = {
-        name
-        for name in rules_by_name
-        if any(marker in name for marker in _ELIGIBILITY_MARKERS)
-    }
-    return sorted(eligibility - reachable - {output})
-
-
-def _auto_gate_transitive_deps(
-    start: str, rules_by_name: Mapping[str, Mapping[str, Any]]
-) -> set[str]:
-    seen: set[str] = set()
-    stack: list[str] = [start]
-    while stack:
-        name = stack.pop()
-        if name in seen or name not in rules_by_name:
-            continue
-        seen.add(name)
-        rule = rules_by_name[name]
-        versions = rule.get("versions") or []
-        if isinstance(versions, list):
-            for version in versions:
-                if not isinstance(version, Mapping):
-                    continue
-                formula = version.get("formula")
-                if isinstance(formula, str):
-                    for identifier in IDENT_RE.findall(formula):
-                        if identifier in _AUTO_GATE_FORMULA_KEYWORDS:
-                            continue
-                        stack.append(identifier)
-        derived_relation = rule.get("derived_relation") or rule.get("derivation")
-        if isinstance(derived_relation, Mapping):
-            predicate = derived_relation.get("predicate")
-            if isinstance(predicate, str):
-                stack.append(predicate)
-            elif isinstance(predicate, Mapping):
-                inner = predicate.get("name")
-                if isinstance(inner, str):
-                    stack.append(inner)
-    return seen
 
 
 def _dump_yaml(payload: Mapping[str, Any]) -> bytes:

@@ -36,6 +36,49 @@ def test_table_lookup_with_extension_is_parameterized():
     assert "additional_amount" in rule["versions"][0]["formula"]
 
 
+def test_derived_relation_builds_filtered_entity_rule():
+    rule = build_transformation(
+        "derived_relation",
+        {
+            "pattern": "derived_relation",
+            "name": "snap_unit",
+            "effective_from": "2026-01-01",
+            "arity": 2,
+            "source_relation": "member_of_household",
+            "entity": "SnapUnit",
+            "member_relation": "members",
+            "slot_entities": ["Person", "Household"],
+            "predicate": "snap_member_eligible",
+            "source": "7 USC 2012(m)",
+        },
+    )
+
+    assert rule["kind"] == "derived_relation"
+    assert rule["derived_relation"]["entity"] == "SnapUnit"
+    assert rule["derived_relation"]["source_relation"] == "member_of_household"
+    assert rule["derived_relation"]["arity"] == 2
+    assert rule["derived_relation"]["slot_entities"] == ["Person", "Household"]
+    assert rule["versions"][0]["formula"] == "snap_member_eligible"
+    assert rule["source"] == "7 USC 2012(m)"
+
+
+def test_derived_relation_rejects_missing_source_relation():
+    with pytest.raises(TransformationError):
+        build_transformation(
+            "derived_relation",
+            {
+                "pattern": "derived_relation",
+                "name": "snap_unit",
+                "effective_from": "2026-01-01",
+                "arity": 2,
+                "entity": "SnapUnit",
+                "member_relation": "members",
+                "slot_entities": ["Person", "Household"],
+                "predicate": "snap_member_eligible",
+            },
+        )
+
+
 def test_unknown_pattern_fails_loudly():
     with pytest.raises(TransformationError, match="unknown transformation"):
         build_transformation("program_specific", {})
