@@ -65,6 +65,23 @@ def any_related(parameters: Mapping[str, Any]) -> Rule:
     return _base_rule(parameters, name=name, dtype="Judgment", formula=formula)
 
 
+def conditional_value(parameters: Mapping[str, Any]) -> Rule:
+    """Create a derived value selected by a judgment condition."""
+
+    name = _identifier(parameters, "name")
+    condition = _identifier(parameters, "condition")
+    when_true = _identifier(parameters, "when_true")
+    when_false = parameters.get("when_false", 0)
+    if isinstance(when_false, str):
+        else_formula = _identifier({"when_false": when_false}, "when_false")
+    elif isinstance(when_false, int | float):
+        else_formula = str(when_false)
+    else:
+        raise TransformationError("when_false must be an identifier or number")
+    formula = f"if {condition}:\n    {when_true}\nelse:\n    {else_formula}"
+    return _base_rule(parameters, name=name, formula=formula)
+
+
 def derived_relation(parameters: Mapping[str, Any]) -> Rule:
     """Create a derived_relation rule (filtered membership over a source relation).
 
@@ -143,6 +160,7 @@ def table_lookup_with_extension(parameters: Mapping[str, Any]) -> Rule:
 PATTERNS: dict[str, Builder] = {
     "all_of": all_of,
     "any_related": any_related,
+    "conditional_value": conditional_value,
     "derived_relation": derived_relation,
     "sum_terms": sum_terms,
     "table_lookup_with_extension": table_lookup_with_extension,

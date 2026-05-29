@@ -62,6 +62,28 @@ def test_derived_relation_builds_filtered_entity_rule():
     assert rule["source"] == "7 USC 2012(m)"
 
 
+def test_conditional_value_builds_generic_rule():
+    rule = build_transformation(
+        "conditional_value",
+        {
+            "pattern": "conditional_value",
+            "name": "benefit",
+            "effective_from": "2026-01-01",
+            "condition": "eligible",
+            "when_true": "allotment",
+            "when_false": 0,
+            "dtype": "Money",
+            "unit": "USD",
+        },
+    )
+
+    assert rule["dtype"] == "Money"
+    assert rule["unit"] == "USD"
+    assert rule["versions"][0]["formula"] == (
+        "if eligible:\n    allotment\nelse:\n    0"
+    )
+
+
 def test_derived_relation_rejects_missing_source_relation():
     with pytest.raises(TransformationError):
         build_transformation(
