@@ -171,7 +171,12 @@ def _assert_eligibility_coverage(
             # they're the program-level override.
             rules_by_name[name] = rule
 
-    acknowledged = set(spec.acknowledged_incomplete)
+    # Auto-gated outputs opt out of strict coverage: the auto-gate already
+    # wired in the household-level eligibility gates; any remaining uncovered
+    # rules are conditional alternatives or exception clauses the auto-gate
+    # deliberately excludes (because AND-gating them would require inputs
+    # the program doesn't expose).
+    acknowledged = set(spec.acknowledged_incomplete) | set(spec.auto_gate_outputs)
     for output in spec.outputs:
         if output in acknowledged:
             continue
@@ -587,6 +592,114 @@ def _summary(spec: ProgramSpec, corpus_state: CorpusState) -> str:
     )
 
 
+# Name suffixes that identify a household-level eligibility gate.
+# Restrict auto-gating to these to avoid pulling in conditional
+# alternatives or exception-handling rules that require inputs the
+# program doesn't expose.
+#
+# ``_categorically_eligible`` is intentionally NOT in this list:
+# categorical eligibility is an OR-alternative to the income test, not
+# an AND-requirement on top of it. Auto-gating it produces wrong
+# answers (live failure 2026-05-28 on us-ny/snap: federal
+# ``snap_regular_categorically_eligible`` AND-gated alongside NY's BBCE
+# excluded NY-BBCE-eligible households that don't also receive
+# TANF/SSI). Categorical eligibility belongs inside a rolled-up
+# ``*_income_eligible`` rule via an OR, which the rulespec encodes.
+#
+# Add suffixes here as new gate families emerge across benefit programs.
+_HOUSEHOLD_GATE_SUFFIXES: tuple[str, ...] = (
+    "_income_eligible",
+    "_resource_eligible",
+    "_residency_eligible",
+)
+
+
+def _filter_to_household_gate_candidates(
+    candidates: list[str], output_name: str, program_token: str
+) -> list[str]:
+    """Return only names that look like a top-level household eligibility
+    gate AND belong to the same program as the output being gated.
+
+    "Belongs to" matches the program token as an underscore-bounded token
+    anywhere in the rule name. This handles state-namespaced rules like
+    ``ny_snap_categorically_eligible`` for an ``us-ny/snap`` program — the
+    older output-prefix-only check rejected those because their leading
+    token was the state code, not ``snap``. ``program_token`` comes from
+    ``spec.program`` so cross-program rules (e.g. ``ctc_*`` in a SNAP
+    program's shared scope) are still rejected.
+
+    Both the program token and the legacy output-derived prefix are
+    accepted to preserve compatibility with bench specs that don't set
+    ``program`` explicitly (existing tests rely on the output-prefix
+    fallback)."""
+    tokens: list[str] = []
+    if program_token:
+        tokens.append(program_token)
+    output_prefix = _program_prefix(output_name).rstrip("_")
+    if output_prefix and output_prefix not in tokens:
+        tokens.append(output_prefix)
+    if not tokens:
+        return []
+
+    def belongs(name: str) -> bool:
+        for tok in tokens:
+            if name == tok or name.startswith(f"{tok}_") or f"_{tok}_" in name:
+                return True
+        return False
+
+    return [
+        name
+        for name in candidates
+        if belongs(name)
+        and any(name.endswith(suffix) for suffix in _HOUSEHOLD_GATE_SUFFIXES)
+    ]
+
+
+def _program_prefix(name: str) -> str:
+    """Return ``"<root>_"`` from a snake_case name (e.g. snap_eligible -> snap_)."""
+    if "_" not in name:
+        return ""
+    return name.split("_", 1)[0] + "_"
+
+
+def _minimal_cover(
+    candidates: list[str], rules_by_name: Mapping[str, Mapping[str, Any]]
+) -> list[str]:
+    """Drop candidates that are transitively reachable from another candidate.
+
+    The eligibility-marker filter sweeps in both top-level rollups
+    (``snap_income_eligible``) AND their constituent leaves
+    (``ny_snap_categorically_eligible``, ``snap_standard_income_eligible``).
+    AND-gating both is at best redundant and at worst wrong: if the rollup
+    expresses an OR over alternatives, gating the leaves forces all the
+    alternatives to hold simultaneously, which they're not designed to.
+    Keeping only rules that no other candidate reaches preserves the
+    rulespec's encoded OR-structure inside each gated rollup."""
+
+    from .coverage import _transitive_dependencies
+
+    candidate_set = set(candidates)
+    dominated: set[str] = set()
+    for cand in candidates:
+        deps = _transitive_dependencies(cand, rules_by_name)
+        for dep in deps:
+            if dep != cand and dep in candidate_set:
+                dominated.add(dep)
+    return [c for c in candidates if c not in dominated]
+
+
+def _program_token(program: str) -> str:
+    """Return the program identifier from a ``spec.program`` path.
+
+    ``us-ny/snap`` → ``snap``; ``co/medicaid`` → ``medicaid``; ``snap`` →
+    ``snap``. Used by auto-gate to recognize rules that belong to the
+    program regardless of state-namespace prefix."""
+    if not program:
+        return ""
+    tail = program.rsplit("/", 1)[-1].strip()
+    return tail.lower()
+
+
 def _apply_auto_gate_outputs(
     spec: ProgramSpec,
     corpus_state: CorpusState,
@@ -634,14 +747,26 @@ def _apply_auto_gate_outputs(
         uncovered = find_uncovered_eligibility_rules(
             output=name, rules_by_name=rules_by_name
         )
-        # Restrict to rules sharing the original output's name prefix so we
-        # don't pull in unrelated programs' eligibility rules that happen
-        # to share the corpus root (e.g. CTC/EITC eligibility rules when
-        # gating SNAP). Prefix derived from the longest leading run of
-        # underscore-delimited segments shared with the output name.
-        prefix = _shared_name_prefix(name)
-        program_uncovered = [n for n in uncovered if prefix and n.startswith(prefix)]
-        if not program_uncovered:
+        # Only AND-gate rules that look like household-level eligibility
+        # gates (income/resource/residency/categorical) AND share the gated
+        # output's program prefix. The broader "any uncovered eligibility
+        # rule" set sweeps in conditional alternatives and exception clauses
+        # that require inputs not present in every household — AND-gating
+        # those collapses the formula to None for the common case (live
+        # failure 2026-05-28: 0/8 cases evaluated when 9 unrelated rules
+        # were pulled in).
+        gate_uncovered = _filter_to_household_gate_candidates(
+            uncovered, name, _program_token(spec.program)
+        )
+        # Reduce to minimal cover: drop any candidate that's reachable
+        # via another candidate's dependency tree. The rulespec already
+        # rolls alternative gates up (e.g. snap_income_eligible reaches
+        # ny_snap_categorically_eligible via its OR-formula), so gating
+        # both the rollup and its leaves redundantly AND-chains an OR
+        # alternative — collapsing the formula to False for cases that
+        # qualify under one branch but not the other.
+        gate_uncovered = _minimal_cover(gate_uncovered, rules_by_name)
+        if not gate_uncovered:
             new_rules.append(rule)
             continue
 
@@ -659,7 +784,7 @@ def _apply_auto_gate_outputs(
             "dtype": rule.get("dtype", "Judgment"),
             "period": rule.get("period", "Month"),
             "source": rule.get("source", ""),
-            "conditions": [core_name, *program_uncovered],
+            "conditions": [core_name, *gate_uncovered],
         }
         effective_from = (rule.get("versions") or [{}])[0].get("effective_from")
         if effective_from:
@@ -667,13 +792,6 @@ def _apply_auto_gate_outputs(
         new_rules.append(build_transformation("all_of", wrapper_params))
 
     return new_rules
-
-
-def _shared_name_prefix(name: str) -> str:
-    """Return ``"<root>_"`` from a snake_case name (e.g. snap_eligible -> snap_)."""
-    if "_" not in name:
-        return ""
-    return name.split("_", 1)[0] + "_"
 
 
 def _dump_yaml(payload: Mapping[str, Any]) -> bytes:
