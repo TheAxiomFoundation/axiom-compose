@@ -592,15 +592,25 @@ def _summary(spec: ProgramSpec, corpus_state: CorpusState) -> str:
     )
 
 
-# Name suffixes that identify a household-level eligibility gate. Restrict
-# auto-gating to these to avoid pulling in conditional alternatives or
-# exception-handling rules that require inputs the program doesn't expose.
+# Name suffixes that identify a household-level eligibility gate.
+# Restrict auto-gating to these to avoid pulling in conditional
+# alternatives or exception-handling rules that require inputs the
+# program doesn't expose.
+#
+# ``_categorically_eligible`` is intentionally NOT in this list:
+# categorical eligibility is an OR-alternative to the income test, not
+# an AND-requirement on top of it. Auto-gating it produces wrong
+# answers (live failure 2026-05-28 on us-ny/snap: federal
+# ``snap_regular_categorically_eligible`` AND-gated alongside NY's BBCE
+# excluded NY-BBCE-eligible households that don't also receive
+# TANF/SSI). Categorical eligibility belongs inside a rolled-up
+# ``*_income_eligible`` rule via an OR, which the rulespec encodes.
+#
 # Add suffixes here as new gate families emerge across benefit programs.
 _HOUSEHOLD_GATE_SUFFIXES: tuple[str, ...] = (
     "_income_eligible",
     "_resource_eligible",
     "_residency_eligible",
-    "_categorically_eligible",
 )
 
 

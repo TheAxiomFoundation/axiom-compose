@@ -281,5 +281,9 @@ def test_auto_gate_includes_state_namespaced_program_rules():
     formula = gate["versions"][0]["formula"]
 
     assert "snap_income_eligible" in formula
-    assert "ny_snap_categorically_eligible" in formula
     assert "tanf_income_eligible" not in formula
+    # Categorical eligibility is an OR-alternative to the income test —
+    # AND-gating it produces wrong answers, so the suffix list excludes
+    # `_categorically_eligible`. The rule belongs in the rulespec's
+    # `*_income_eligible` rollup, not in the auto-synthesized gate.
+    assert "ny_snap_categorically_eligible" not in formula
