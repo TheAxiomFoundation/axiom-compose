@@ -17,6 +17,21 @@ def test_sum_terms_builds_generic_rule():
     assert rule["versions"][0]["formula"] == "a + b"
 
 
+def test_any_of_builds_generic_judgment_rule():
+    rule = build_transformation(
+        "any_of",
+        {
+            "pattern": "any_of",
+            "name": "eligible",
+            "effective_from": "2026-01-01",
+            "conditions": ["standard_eligible", "exempt_eligible"],
+        },
+    )
+
+    assert rule["dtype"] == "Judgment"
+    assert rule["versions"][0]["formula"] == "standard_eligible or exempt_eligible"
+
+
 def test_table_lookup_with_extension_is_parameterized():
     rule = build_transformation(
         "table_lookup_with_extension",

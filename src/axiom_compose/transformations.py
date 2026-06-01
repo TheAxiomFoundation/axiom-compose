@@ -55,6 +55,15 @@ def all_of(parameters: Mapping[str, Any]) -> Rule:
     return _base_rule(parameters, name=name, dtype="Judgment", formula=formula)
 
 
+def any_of(parameters: Mapping[str, Any]) -> Rule:
+    """Create a derived judgment satisfied by any listed condition."""
+
+    name = _identifier(parameters, "name")
+    conditions = _identifiers(parameters, "conditions")
+    formula = " or ".join(conditions) if conditions else "false"
+    return _base_rule(parameters, name=name, dtype="Judgment", formula=formula)
+
+
 def any_related(parameters: Mapping[str, Any]) -> Rule:
     """Create a judgment that any related entity satisfies a condition."""
 
@@ -159,6 +168,7 @@ def table_lookup_with_extension(parameters: Mapping[str, Any]) -> Rule:
 
 PATTERNS: dict[str, Builder] = {
     "all_of": all_of,
+    "any_of": any_of,
     "any_related": any_related,
     "conditional_value": conditional_value,
     "derived_relation": derived_relation,
