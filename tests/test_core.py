@@ -287,3 +287,98 @@ def test_auto_gate_includes_state_namespaced_program_rules():
     # `_categorically_eligible`. The rule belongs in the rulespec's
     # `*_income_eligible` rollup, not in the auto-synthesized gate.
     assert "ny_snap_categorically_eligible" not in formula
+
+
+def test_auto_gate_prefers_composed_income_rollup_over_standard_income_leaf():
+    """SNAP categorical eligibility can exempt households from the standard
+    income limits. When a spec composes that OR into an ``*_income_eligible``
+    rollup, auto-gate should gate the rollup and drop the narrower standard
+    income leaf from the synthesized AND wrapper."""
+    from axiom_compose.spec import ProgramSpec, TransformationSpec
+
+    spec = ProgramSpec(
+        program="us-ny/snap",
+        period="2026-01",
+        outputs=("snap_eligible",),
+        scope={"federal": ("statutes/x/1",)},
+        transformations=(
+            TransformationSpec(
+                pattern="any_related",
+                parameters={
+                    "name": "snap_eligible",
+                    "effective_from": "2026-01-01",
+                    "entity": "Household",
+                    "period": "Month",
+                    "source": "us:statutes/x/1",
+                    "relation": "member_of_household",
+                    "condition": "snap_member_eligible",
+                },
+            ),
+            TransformationSpec(
+                pattern="any_of",
+                parameters={
+                    "name": "snap_income_eligible",
+                    "effective_from": "2026-01-01",
+                    "entity": "Household",
+                    "period": "Month",
+                    "source": "us-ny:regulations/18-nycrr/387/14/a/5",
+                    "conditions": [
+                        "snap_income_limit_exemption_for_categorically_eligible_household",
+                        "snap_standard_income_eligible",
+                    ],
+                },
+            ),
+        ),
+        auto_gate_outputs=("snap_eligible",),
+    )
+    corpus = CorpusState(
+        modules={
+            "us:statutes/x/1": RuleSpecModule(
+                target="us:statutes/x/1",
+                payload={
+                    "rules": [
+                        {
+                            "name": "snap_member_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        {
+                            "name": "snap_standard_income_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "snap_net_income_eligible"}],
+                        },
+                        {
+                            "name": "snap_income_limit_exemption_for_categorically_eligible_household",
+                            "kind": "derived",
+                            "versions": [{"formula": "ny_snap_categorically_eligible"}],
+                        },
+                        {
+                            "name": "ny_snap_categorically_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                        {
+                            "name": "snap_resource_eligible",
+                            "kind": "derived",
+                            "versions": [{"formula": "true"}],
+                        },
+                    ]
+                },
+            ),
+        },
+        corpus_sha="auto-gate-fixture",
+    )
+
+    program = compose(spec, corpus)
+    rules_by_name = {
+        rule["name"]: rule
+        for rule in program.payload["rules"]
+        if isinstance(rule, dict)
+    }
+    gate = rules_by_name["snap_eligible"]
+    formula = gate["versions"][0]["formula"]
+
+    assert "snap_eligible_core" in formula
+    assert "snap_income_eligible" in formula
+    assert "snap_resource_eligible" in formula
+    assert "snap_standard_income_eligible" not in formula

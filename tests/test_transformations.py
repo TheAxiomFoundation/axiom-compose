@@ -17,6 +17,21 @@ def test_sum_terms_builds_generic_rule():
     assert rule["versions"][0]["formula"] == "a + b"
 
 
+def test_any_of_builds_generic_judgment_rule():
+    rule = build_transformation(
+        "any_of",
+        {
+            "pattern": "any_of",
+            "name": "eligible",
+            "effective_from": "2026-01-01",
+            "conditions": ["standard_eligible", "exempt_eligible"],
+        },
+    )
+
+    assert rule["dtype"] == "Judgment"
+    assert rule["versions"][0]["formula"] == "standard_eligible or exempt_eligible"
+
+
 def test_table_lookup_with_extension_is_parameterized():
     rule = build_transformation(
         "table_lookup_with_extension",
@@ -60,6 +75,28 @@ def test_derived_relation_builds_filtered_entity_rule():
     assert rule["derived_relation"]["slot_entities"] == ["Person", "Household"]
     assert rule["versions"][0]["formula"] == "snap_member_eligible"
     assert rule["source"] == "7 USC 2012(m)"
+
+
+def test_conditional_value_builds_generic_rule():
+    rule = build_transformation(
+        "conditional_value",
+        {
+            "pattern": "conditional_value",
+            "name": "benefit",
+            "effective_from": "2026-01-01",
+            "condition": "eligible",
+            "when_true": "allotment",
+            "when_false": 0,
+            "dtype": "Money",
+            "unit": "USD",
+        },
+    )
+
+    assert rule["dtype"] == "Money"
+    assert rule["unit"] == "USD"
+    assert rule["versions"][0]["formula"] == (
+        "if eligible:\n    allotment\nelse:\n    0"
+    )
 
 
 def test_derived_relation_rejects_missing_source_relation():
