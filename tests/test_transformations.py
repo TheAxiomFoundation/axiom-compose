@@ -77,6 +77,50 @@ def test_derived_relation_builds_filtered_entity_rule():
     assert rule["source"] == "7 USC 2012(m)"
 
 
+def test_data_relation_builds_runtime_relation_rule():
+    rule = build_transformation(
+        "data_relation",
+        {
+            "pattern": "data_relation",
+            "name": "child_of_benefit_unit",
+            "arity": 2,
+            "source": "runtime benefit-unit membership",
+        },
+    )
+
+    assert rule == {
+        "name": "child_of_benefit_unit",
+        "kind": "data_relation",
+        "data_relation": {"arity": 2},
+        "source": "runtime benefit-unit membership",
+    }
+
+
+def test_derived_formula_builds_explicit_bridge_rule():
+    rule = build_transformation(
+        "derived_formula",
+        {
+            "pattern": "derived_formula",
+            "name": "amount",
+            "effective_from": "2026-04-01",
+            "entity": "Family",
+            "dtype": "Money",
+            "period": "Month",
+            "unit": "GBP",
+            "formula": "standard_allowance_amount + childcare_costs_element_amount",
+            "source": "program bridge",
+        },
+    )
+
+    assert rule["name"] == "amount"
+    assert rule["entity"] == "Family"
+    assert rule["unit"] == "GBP"
+    assert rule["versions"][0]["formula"] == (
+        "standard_allowance_amount + childcare_costs_element_amount"
+    )
+    assert rule["source"] == "program bridge"
+
+
 def test_conditional_value_builds_generic_rule():
     rule = build_transformation(
         "conditional_value",

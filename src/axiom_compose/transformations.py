@@ -166,11 +166,46 @@ def table_lookup_with_extension(parameters: Mapping[str, Any]) -> Rule:
     return _base_rule(parameters, name=name, formula=formula)
 
 
+def derived_formula(parameters: Mapping[str, Any]) -> Rule:
+    """Create a derived rule from an explicit formula.
+
+    Use this when a program assembly needs a law-to-law bridge that is too
+    specific for the smaller canned arithmetic patterns but is still a plain
+    RuleSpec derived output. The pattern is generic: callers provide the source,
+    entity, dtype, period, unit, and formula declaratively.
+    """
+
+    name = _identifier(parameters, "name")
+    formula = _string(parameters, "formula")
+    dtype = _string(parameters, "dtype", default="Money")
+    return _base_rule(parameters, name=name, dtype=dtype, formula=formula)
+
+
+def data_relation(parameters: Mapping[str, Any]) -> Rule:
+    """Create a data_relation rule for entity membership supplied at runtime."""
+
+    name = _identifier(parameters, "name")
+    arity = _positive_int(parameters, "arity")
+    source = _string(
+        parameters,
+        "source",
+        default=f"axiom-compose:{parameters.get('pattern', 'data_relation')}",
+    )
+    return {
+        "name": name,
+        "kind": "data_relation",
+        "data_relation": {"arity": arity},
+        "source": source,
+    }
+
+
 PATTERNS: dict[str, Builder] = {
     "all_of": all_of,
     "any_of": any_of,
     "any_related": any_related,
     "conditional_value": conditional_value,
+    "data_relation": data_relation,
+    "derived_formula": derived_formula,
     "derived_relation": derived_relation,
     "sum_terms": sum_terms,
     "table_lookup_with_extension": table_lookup_with_extension,
