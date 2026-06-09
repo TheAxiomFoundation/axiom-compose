@@ -414,6 +414,7 @@ def _root_imports(spec: ProgramSpec, corpus_state: CorpusState) -> tuple[str, ..
         for path in paths
     )
     if explicit_roots:
+        _assert_scope_roots_in_corpus(explicit_roots, corpus_state)
         return explicit_roots
     if corpus_state.index is None:
         raise ComposeError(
@@ -507,6 +508,23 @@ def _allowed_prefixes_for_program(
         return _dedupe(("us", *prefixes))
     program_prefix = program.split("/", 1)[0]
     return _dedupe((program_prefix, "us"))
+
+
+def _assert_scope_roots_in_corpus(
+    roots: tuple[str, ...], corpus_state: CorpusState
+) -> None:
+    # A scope entry that names no module in the corpus would otherwise pass
+    # through composition and surface as an engine import error three repos
+    # downstream. Module-less corpus states (pattern-synthesis fixtures) are
+    # exempt: there is nothing to resolve against.
+    if not corpus_state.modules:
+        return
+    missing = sorted(root for root in roots if root not in corpus_state.modules)
+    if missing:
+        raise ComposeError(
+            "scope entries do not resolve to any module in the corpus: "
+            + ", ".join(missing)
+        )
 
 
 def _scope_target(program: str, scope_name: str, path: str) -> str:

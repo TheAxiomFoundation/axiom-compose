@@ -18,6 +18,14 @@ jobs:
         with:
           repository: TheAxiomFoundation/axiom-rules-engine
           path: _axiom/axiom-rules-engine
+      - uses: actions/checkout@v6.0.2
+        with:
+          repository: TheAxiomFoundation/rulespec-us-ca
+          path: _axiom/rulespec-us-ca
+      - uses: actions/checkout@v6.0.2
+        with:
+          repository: TheAxiomFoundation/axiom-programs
+          path: _axiom/axiom-programs
       - uses: astral-sh/setup-uv@v8.1.0
       - run: uv python install 3.14
       - run: uv run --python 3.14 --extra dev ruff check src/ tests/
@@ -25,4 +33,6 @@ jobs:
       - run: uv run --python 3.14 --extra dev --extra policyengine python -m pytest
         env:
           AXIOM_RULESPEC_US_ROOT: ${{ github.workspace }}/_axiom/rulespec-us
+          AXIOM_RULESPEC_US_CA_ROOT: ${{ github.workspace }}/_axiom/rulespec-us-ca
+          AXIOM_PROGRAMS_ROOT: ${{ github.workspace }}/_axiom/axiom-programs
           AXIOM_RULES_ENGINE_ROOT: ${{ github.workspace }}/_axiom/axiom-rules-engine
