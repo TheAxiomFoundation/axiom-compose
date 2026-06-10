@@ -1,0 +1,1 @@
+Compose now fails fast when a spec scope entry does not resolve to any module in the loaded corpus, naming the dangling targets, instead of emitting a program that fails at engine compile. Module-less corpus states (pattern-synthesis fixtures) are exempt.
