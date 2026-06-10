@@ -349,6 +349,34 @@ def load_corpus_state(
     )
 
 
+_JURISDICTION_DIR_RE = re.compile(r"^[a-z]{2}(-[a-z0-9-]+)*$")
+_CONTENT_MARKER_DIRS = ("statutes", "regulations", "policies", "legislation", "sources")
+
+
+def _jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
+    """(prefix, content root) pairs for one checkout.
+
+    Two layouts are supported, yielding identical targets:
+    - legacy standalone repo `rulespec-<prefix>` with content at its root;
+    - country monorepo `rulespec-<country>` holding one directory per
+      jurisdiction (us/, us-co/, …), each with its own content dirs.
+    """
+    country = _repo_prefix(root)
+    if any((root / marker).is_dir() for marker in _CONTENT_MARKER_DIRS):
+        return [(country, root)]
+    jurisdiction_dirs = [
+        (child.name, child)
+        for child in sorted(root.iterdir())
+        if child.is_dir()
+        and _JURISDICTION_DIR_RE.match(child.name)
+        and (child.name == country or child.name.startswith(f"{country}-"))
+        and any((child / marker).is_dir() for marker in _CONTENT_MARKER_DIRS)
+    ]
+    if jurisdiction_dirs:
+        return jurisdiction_dirs
+    return [(country, root)]
+
+
 def load_corpus_from_roots(
     roots: list[Path] | tuple[Path, ...],
     *,
@@ -357,22 +385,26 @@ def load_corpus_from_roots(
 ) -> CorpusState:
     """Load and index all RuleSpec modules under rulespec-style repo roots.
 
-    This is an I/O helper for startup/cache-building code. The pure composition
-    function does not call it.
+    Each root may be a legacy standalone jurisdiction repo or a country
+    monorepo (see `_jurisdiction_roots`). This is an I/O helper for
+    startup/cache-building code. The pure composition function does not
+    call it.
     """
 
     modules: dict[str, RuleSpecModule] = {}
     for root in roots:
         root = Path(root)
-        prefix = _repo_prefix(root)
-        for path in sorted(root.rglob("*.yml")) + sorted(root.rglob("*.yaml")):
-            if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
-                continue
-            target = _target_for_repo_file(prefix, root, path)
-            payload = yaml.safe_load(path.read_text()) or {}
-            if not isinstance(payload, Mapping):
-                raise ComposeError(f"{path}: module root must be a mapping")
-            modules[target] = module_from_payload(target, payload)
+        for prefix, content_root in _jurisdiction_roots(root):
+            for path in sorted(content_root.rglob("*.yml")) + sorted(
+                content_root.rglob("*.yaml")
+            ):
+                if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
+                    continue
+                target = _target_for_repo_file(prefix, content_root, path)
+                payload = yaml.safe_load(path.read_text()) or {}
+                if not isinstance(payload, Mapping):
+                    raise ComposeError(f"{path}: module root must be a mapping")
+                modules[target] = module_from_payload(target, payload)
     return with_corpus_index(
         CorpusState(
             modules=modules,

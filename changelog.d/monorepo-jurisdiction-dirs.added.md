@@ -1,0 +1,1 @@
+`load_corpus_from_roots` accepts country-monorepo checkouts (a repo named `rulespec-<country>` holding one directory per jurisdiction, e.g. `rulespec-us/us/`, `rulespec-us/us-co/`) alongside legacy standalone jurisdiction repos, yielding identical module targets for both layouts.
