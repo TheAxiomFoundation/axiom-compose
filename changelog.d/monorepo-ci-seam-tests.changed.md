@@ -1,0 +1,1 @@
+CI runs the real-corpus CA SNAP seam tests against the rulespec-us country monorepo (single checkout serves federal, state, and program-spec roots); they previously skipped in CI for lack of state/program checkouts.
