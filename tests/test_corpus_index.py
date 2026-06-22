@@ -254,3 +254,43 @@ rules:
         "us-or:programs/snap",
         "us:statutes/example/amount",
     ]
+
+
+def test_country_monorepo_loader_prefers_jurisdiction_dirs_over_empty_markers(
+    tmp_path,
+):
+    us_root = tmp_path / "rulespec-us"
+    (us_root / "statutes").mkdir(parents=True)
+    (us_root / "sources").mkdir()
+    (us_root / "us" / "statutes/example").mkdir(parents=True)
+    (us_root / "us-ny" / "policies/example").mkdir(parents=True)
+    (us_root / "us" / "statutes/example/amount.yaml").write_text(
+        """
+format: rulespec/v1
+rules:
+  - name: federal_amount
+    kind: derived
+    versions:
+      - effective_from: '2026-01-01'
+        formula: 100
+""".strip()
+    )
+    (us_root / "us-ny" / "policies/example/tanf.yaml").write_text(
+        """
+format: rulespec/v1
+imports:
+  - us:statutes/example/amount
+rules:
+  - name: ny_tanf
+    kind: derived
+    versions:
+      - effective_from: '2026-01-01'
+        formula: federal_amount
+""".strip()
+    )
+
+    corpus = load_corpus_from_roots([us_root])
+
+    assert "us:statutes/example/amount" in corpus.modules
+    assert "us-ny:policies/example/tanf" in corpus.modules
+    assert "us:us-ny/policies/example/tanf" not in corpus.modules
