@@ -362,8 +362,6 @@ def _jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
       jurisdiction (us/, us-co/, …), each with its own content dirs.
     """
     country = _repo_prefix(root)
-    if any((root / marker).is_dir() for marker in _CONTENT_MARKER_DIRS):
-        return [(country, root)]
     jurisdiction_dirs = [
         (child.name, child)
         for child in sorted(root.iterdir())
@@ -373,8 +371,35 @@ def _jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
         and any((child / marker).is_dir() for marker in _CONTENT_MARKER_DIRS)
     ]
     if jurisdiction_dirs:
-        return jurisdiction_dirs
+        roots = []
+        if _has_rulespec_content_files(root):
+            roots.append((country, root))
+        roots.extend(jurisdiction_dirs)
+        return roots
+    if any((root / marker).is_dir() for marker in _CONTENT_MARKER_DIRS):
+        return [(country, root)]
     return [(country, root)]
+
+
+def _has_rulespec_content_files(root: Path) -> bool:
+    """Whether root-level content marker dirs contain actual RuleSpec modules.
+
+    Empty marker directories can remain in a country monorepo after content is
+    moved under jurisdiction directories. They should not make the loader treat
+    the whole monorepo as one standalone jurisdiction.
+    """
+
+    for marker in _CONTENT_MARKER_DIRS:
+        directory = root / marker
+        if not directory.is_dir():
+            continue
+        for path in sorted(directory.rglob("*.yml")) + sorted(
+            directory.rglob("*.yaml")
+        ):
+            if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
+                continue
+            return True
+    return False
 
 
 def load_corpus_from_roots(
