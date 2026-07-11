@@ -1,9 +1,9 @@
 """Scope entries must name modules the corpus actually contains.
 
 A dangling entry used to pass through composition and only fail at engine
-compile, three repos downstream (see axiom-programs#14). With a loaded
-corpus, compose now refuses and names the offending targets; module-less
-corpus states (pattern-synthesis fixtures) stay exempt.
+compile downstream. With a loaded corpus, compose now refuses and names the
+offending targets; module-less corpus states used by isolated transformation
+tests stay exempt. The production loader rejects an empty atomic corpus.
 """
 
 import pytest

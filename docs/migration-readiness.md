@@ -23,8 +23,8 @@ consumers.
    - `snap_work_requirement_eligible`
    - `snap_eligible`
 
-   These need source-provenance encoding in `rulespec-us` and/or
-   `rulespec-us-co`. Until they land, the composer should not pretend to
+   These need source-provenance encoding in the `us/` and `us-co/`
+   jurisdictions of `rulespec-us`. Until they land, the composer should not pretend to
    reproduce the current CO SNAP artifact.
 
 2. Broaden real-corpus golden tests.

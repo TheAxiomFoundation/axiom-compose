@@ -13,6 +13,20 @@ class SpecError(ValueError):
     """Raised when a declarative program spec is invalid."""
 
 
+PROGRAM_SPEC_KEYS = frozenset(
+    {
+        "acknowledged_incomplete",
+        "auto_gate_outputs",
+        "outputs",
+        "period",
+        "program",
+        "rounding",
+        "scope",
+        "transformations",
+    }
+)
+
+
 @dataclass(frozen=True)
 class TransformationSpec:
     """A declarative invocation of a generic transformation pattern."""
@@ -45,6 +59,13 @@ class ProgramSpec:
 
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ProgramSpec":
+        non_string_keys = [key for key in raw if not isinstance(key, str)]
+        if non_string_keys:
+            rendered = ", ".join(repr(key) for key in non_string_keys)
+            raise SpecError(f"spec keys must be strings: {rendered}")
+        unknown = sorted(set(raw) - PROGRAM_SPEC_KEYS)
+        if unknown:
+            raise SpecError(f"unsupported spec keys: {', '.join(map(str, unknown))}")
         required = ("program", "period", "outputs")
         missing = [key for key in required if key not in raw]
         if missing:
@@ -128,6 +149,8 @@ class ProgramSpec:
             ]
         if self.acknowledged_incomplete:
             payload["acknowledged_incomplete"] = list(self.acknowledged_incomplete)
+        if self.auto_gate_outputs:
+            payload["auto_gate_outputs"] = list(self.auto_gate_outputs)
         return payload
 
 

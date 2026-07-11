@@ -1,12 +1,13 @@
 """Compose-time coverage assertion.
 
-When a program spec declares an eligibility-shaped output (anything whose
-name carries an ``eligible``/``ineligible`` marker), this module walks the
+When a program spec synthesizes a terminal eligibility-shaped output (anything
+whose name carries an ``eligible``/``ineligible`` marker and is not itself a
+dependency of another declared eligibility output), this module walks the
 output rule's transitive dependency graph and reports any other
 eligibility-shaped rules in scope that the output does *not* reference.
 Used by ``axiom_compose.core.compose`` to fail compilation when the
-declared eligibility chain is too short — the gap that bit CA SNAP
-where ``snap_eligible`` only checked per-member eligibility and silently
+program-level eligibility chain is too short — the gap that bit CA SNAP
+where a synthesized ``snap_eligible`` only checked per-member eligibility and silently
 ignored the household income, asset, and residency tests that the
 imported atomic rules already encoded.
 
@@ -89,16 +90,17 @@ def find_uncovered_eligibility_rules(
     to the program and the synthesized transformation rules — the
     analyzer treats them uniformly.
     """
-    reachable = _transitive_dependencies(output, rules_by_name)
+    reachable = transitive_dependencies(output, rules_by_name)
     eligibility = {
         name for name in rules_by_name if any(marker in name for marker in markers)
     }
     return sorted(eligibility - reachable - {output})
 
 
-def _transitive_dependencies(
+def transitive_dependencies(
     start: str, rules_by_name: Mapping[str, Mapping[str, Any]]
 ) -> set[str]:
+    """Return every known rule reachable from ``start``, including itself."""
     seen: set[str] = set()
     stack: list[str] = [start]
     while stack:
