@@ -12,7 +12,9 @@ ROOT = Path(__file__).parent
 
 def test_real_rulespec_us_oasdi_composition_is_stable():
     rulespec_us = _external_path("AXIOM_RULESPEC_US_ROOT")
-    spec = load_spec(ROOT / "fixtures" / "oasdi-wage-tax-spec.yaml")
+    spec = load_spec(
+        rulespec_us / "us" / "programs" / "payroll" / "oasdi-wage-tax" / "fy-2026.yaml"
+    )
     corpus = load_corpus_from_roots(
         [rulespec_us],
         corpus_sha="rulespec-us@acceptance",
@@ -28,6 +30,7 @@ def test_real_rulespec_us_oasdi_composition_is_stable():
         "  summary: 'Deterministic composition for us/payroll/oasdi-wage-tax at 2026. Outputs: oasdi_wage_tax. Corpus: rulespec-us@acceptance.'\n"
         "imports:\n"
         "- us:statutes/26/3101/a\n"
+        "- us:statutes/26/3121/a/1\n"
     )
 
 
@@ -55,7 +58,9 @@ def _external_path(env_var: str) -> Path:
 def _run_axiom_oasdi_case(tmp_path: Path) -> float:
     rulespec_us = _external_path("AXIOM_RULESPEC_US_ROOT")
     engine_root = _external_path("AXIOM_RULES_ENGINE_ROOT")
-    spec = load_spec(ROOT / "fixtures" / "oasdi-wage-tax-spec.yaml")
+    spec = load_spec(
+        rulespec_us / "us" / "programs" / "payroll" / "oasdi-wage-tax" / "fy-2026.yaml"
+    )
     corpus = load_corpus_from_roots(
         [rulespec_us],
         corpus_sha="rulespec-us@acceptance",
@@ -64,25 +69,21 @@ def _run_axiom_oasdi_case(tmp_path: Path) -> float:
     program_path = tmp_path / "oasdi-wage-tax.yaml"
     artifact_path = tmp_path / "oasdi-wage-tax.compiled.json"
     program_path.write_bytes(program.source)
-    env = {
-        **os.environ,
-        "AXIOM_RULESPEC_REPO_ROOTS": str(rulespec_us.parent),
-    }
-
     subprocess.run(
         [
             "cargo",
             "run",
             "--quiet",
             "--",
-            "compile",
+            "compile-composed",
             "--program",
             str(program_path),
+            "--rulespec-root",
+            str(rulespec_us),
             "--output",
             str(artifact_path),
         ],
         cwd=engine_root,
-        env=env,
         check=True,
     )
     completed = subprocess.run(
@@ -96,7 +97,6 @@ def _run_axiom_oasdi_case(tmp_path: Path) -> float:
             str(artifact_path),
         ],
         cwd=engine_root,
-        env=env,
         check=True,
         input=json.dumps(_oasdi_request()),
         text=True,

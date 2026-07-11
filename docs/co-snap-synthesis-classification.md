@@ -1,8 +1,8 @@
 # CO SNAP Synthesis Classification
 
-This is an empirical architecture check against the local file
-`~/rulespec-us-co/policies/cdhs/snap/fy-2026-benefit-calculation.yaml` as read
-on 2026-05-19. That checkout contains 9 synthesis rules under `rules:`.
+This is an empirical architecture check against
+`rulespec-us/us-co/policies/cdhs/snap/fy-2026-benefit-calculation.yaml` as read
+on 2026-05-19. That module contains 9 synthesis rules under `rules:`.
 
 The classification is not an architectural special case. CO SNAP is only a
 fixture used to test whether the universal composer rule holds.
@@ -13,8 +13,8 @@ fixture used to test whether the universal composer rule holds.
   synthesis rule disappears.
 - B: Generic pattern. Implement only if the pattern demonstrably applies across
   program families.
-- C: Should-be-atomic-law. Encode in the relevant `rulespec-*` repo with source
-  provenance.
+- C: Should-be-atomic-law. Encode in the relevant jurisdiction of the canonical
+  `rulespec-<country>` checkout with source provenance.
 - D: Spec-parameterizable. Move to declarative spec data.
 - E: Resists classification. Escalate; the strict architecture is falsified if
   essential entries remain here.

@@ -1,1 +1,1 @@
-CI now composes the production us-ca/snap spec against real rulespec-us + rulespec-us-ca checkouts and compiles the result through axiom-rules-engine, so federal changes that break state programs fail at merge time. Currently xfail pending axiom-programs#14 (specs reference an unencoded 7 CFR 273.9 subsection).
+CI composes the canonical `rulespec-us/us-ca/programs/snap/fy-2026.yaml` ProgramSpec against the same exact country checkout and compiles the result through `axiom-rules-engine`, so federal or state corpus changes that break the program fail at merge time.

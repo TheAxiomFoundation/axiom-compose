@@ -206,6 +206,79 @@ def test_compose_passes_when_eligibility_chain_complete() -> None:
     compose(spec, corpus)
 
 
+def test_declared_eligibility_subgate_is_checked_only_through_terminal_output() -> None:
+    corpus = _make_corpus(
+        dict(
+            [
+                _module(
+                    "us-test:policies/eligibility",
+                    [
+                        _rule("program_resources_eligible", "resource_limit_met"),
+                        _rule("program_income_eligible", "income_limit_met"),
+                    ],
+                )
+            ]
+        )
+    )
+    spec = ProgramSpec(
+        program="us-test/demo",
+        period="2026-01",
+        outputs=(
+            "program_eligible",
+            "program_resources_eligible",
+            "program_income_eligible",
+        ),
+        scope={"state": ("policies/eligibility",)},
+        transformations=(
+            TransformationSpec(
+                pattern="all_of",
+                parameters={
+                    "name": "program_eligible",
+                    "effective_from": "2026-01-01",
+                    "entity": "Household",
+                    "dtype": "Judgment",
+                    "period": "Month",
+                    "conditions": [
+                        "program_resources_eligible",
+                        "program_income_eligible",
+                    ],
+                },
+            ),
+        ),
+    )
+
+    # The sibling sub-gates do not need to reference one another. Whole-program
+    # coverage belongs to the terminal output that consumes both of them.
+    compose(spec, corpus)
+
+
+def test_direct_atomic_eligibility_output_does_not_own_program_coverage() -> None:
+    corpus = _make_corpus(
+        dict(
+            [
+                _module(
+                    "us-test:policies/eligibility",
+                    [
+                        _rule("program_resources_eligible", "resource_limit_met"),
+                        _rule("program_income_eligible", "income_limit_met"),
+                    ],
+                )
+            ]
+        )
+    )
+    spec = ProgramSpec(
+        program="us-test/demo",
+        period="2026-01",
+        outputs=("program_resources_eligible",),
+        scope={"state": ("policies/eligibility",)},
+    )
+
+    # An imported provision-level output is intentionally narrower than the
+    # entire program. Only a transformation synthesized by this ProgramSpec can
+    # claim, and therefore be checked as, a whole-program eligibility result.
+    compose(spec, corpus)
+
+
 def test_compose_acknowledged_incomplete_suppresses_error() -> None:
     corpus = _make_corpus(
         dict(
@@ -284,4 +357,34 @@ def test_non_eligibility_outputs_are_not_checked() -> None:
             ),
         ),
     )
+    compose(spec, corpus)
+
+
+def test_limit_named_money_output_is_not_misclassified_as_eligibility() -> None:
+    corpus = _make_corpus(
+        dict(
+            [
+                _module(
+                    "us-test:policies/limits",
+                    [
+                        {
+                            **_rule("gross_income_limit", "100"),
+                            "dtype": "Money",
+                        },
+                        {
+                            **_rule("income_eligible", "income <= gross_income_limit"),
+                            "dtype": "Judgment",
+                        },
+                    ],
+                )
+            ]
+        )
+    )
+    spec = ProgramSpec(
+        program="us-test/demo",
+        period="2026-01",
+        outputs=("gross_income_limit",),
+        scope={"state": ("policies/limits",)},
+    )
+
     compose(spec, corpus)

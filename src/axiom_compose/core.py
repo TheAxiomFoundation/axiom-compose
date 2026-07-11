@@ -148,6 +148,7 @@ def _assert_eligibility_coverage(
         ELIGIBILITY_MARKERS,
         find_uncovered_eligibility_rules,
         format_coverage_error,
+        transitive_dependencies,
     )
 
     # Build the unified rule map: atomic rules from imported modules plus
@@ -177,14 +178,52 @@ def _assert_eligibility_coverage(
     # deliberately excludes (because AND-gating them would require inputs
     # the program doesn't expose).
     acknowledged = set(spec.acknowledged_incomplete) | set(spec.auto_gate_outputs)
+    synthesized_rule_names = {
+        name
+        for rule in synthesized_rules
+        if isinstance((name := rule.get("name")), str) and name
+    }
+    eligibility_outputs = {
+        output
+        for output in spec.outputs
+        if any(marker in output for marker in ELIGIBILITY_MARKERS)
+    }
+    nested_eligibility_outputs = {
+        nested
+        for output in eligibility_outputs
+        for nested in transitive_dependencies(output, rules_by_name)
+        if nested != output and nested in eligibility_outputs
+    }
     for output in spec.outputs:
         if output in acknowledged:
             continue
         if not any(marker in output for marker in ELIGIBILITY_MARKERS):
             continue
-        if output not in rules_by_name:
+        if output not in synthesized_rule_names:
+            # Direct atomic outputs expose the meaning of their own provision;
+            # they are not program-level conclusions and therefore do not own
+            # every sibling eligibility rule imported by the ProgramSpec.
+            # Cross-module coverage is a corpus validation concern. This
+            # compose-time assertion only polices conclusions synthesized by
+            # the ProgramSpec's transformations.
+            continue
+        if output in nested_eligibility_outputs:
+            # A declared sub-gate only owns its own condition family. The
+            # terminal eligibility output that consumes it owns whole-program
+            # coverage, so checking both would falsely require every sibling
+            # gate to depend on every other sibling gate.
+            continue
+        output_rule = rules_by_name.get(output)
+        if output_rule is None:
             # The outputs-against-registry check upstream will already
             # have errored on undefined outputs; skip silently here.
+            continue
+        output_dtype = str(output_rule.get("dtype") or "").lower()
+        if output_dtype and output_dtype not in {"bool", "boolean", "judgment"}:
+            # Names such as ``gross_income_limit`` and ``resource_limit`` are
+            # monetary/quantity parameters, not eligibility conclusions. They
+            # may be dependencies of a Judgment output, but must not themselves
+            # trigger the missing-gate assertion.
             continue
         uncovered = find_uncovered_eligibility_rules(
             output=output, rules_by_name=rules_by_name
@@ -349,57 +388,119 @@ def load_corpus_state(
     )
 
 
-_JURISDICTION_DIR_RE = re.compile(r"^[a-z]{2}(-[a-z0-9-]+)*$")
-_CONTENT_MARKER_DIRS = ("statutes", "regulations", "policies", "legislation", "sources")
+_COUNTRY_CHECKOUT_RE = re.compile(r"^rulespec-(?P<country>[a-z]{2})$")
+_JURISDICTION_DIR_RE = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)*$")
+_ATOMIC_RULESPEC_ROOTS = ("legislation", "policies", "regulations", "statutes")
+_PROGRAM_SPEC_ROOT = "programs"
+_FILESYSTEM_ROOTS = (*_ATOMIC_RULESPEC_ROOTS, _PROGRAM_SPEC_ROOT)
+_IMPORT_PREFIX_RE = re.compile(r"^[a-z]{2}(?:-[a-z0-9]+)*$")
+_IMPORT_SEGMENT_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+_IMPORT_FRAGMENT_RE = re.compile(r"^[a-z][a-z0-9_]*$")
 
 
-def _jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
-    """(prefix, content root) pairs for one checkout.
+def _path_uses_exact_directory_entry_casing(path: Path) -> bool:
+    """Return whether every lexical component matches its directory entry.
 
-    Two layouts are supported, yielding identical targets:
-    - legacy standalone repo `rulespec-<prefix>` with content at its root;
-    - country monorepo `rulespec-<country>` holding one directory per
-      jurisdiction (us/, us-co/, …), each with its own content dirs.
+    ``Path.resolve`` cannot detect case aliases on case-insensitive filesystems.
+    Comparing each component to the names actually returned by its parent keeps
+    the Python loader aligned with the Rust loader's exact-path contract.
     """
-    country = _repo_prefix(root)
-    jurisdiction_dirs = [
-        (child.name, child)
-        for child in sorted(root.iterdir())
-        if child.is_dir()
-        and _JURISDICTION_DIR_RE.match(child.name)
-        and (child.name == country or child.name.startswith(f"{country}-"))
-        and any((child / marker).is_dir() for marker in _CONTENT_MARKER_DIRS)
+
+    if not path.is_absolute():
+        return False
+    cursor = Path(path.anchor)
+    for part in path.parts[1:]:
+        try:
+            names = {child.name for child in cursor.iterdir()}
+        except OSError:
+            return False
+        if part not in names:
+            return False
+        cursor /= part
+    return True
+
+
+def _canonical_jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
+    """Return direct jurisdiction roots from one exact country checkout."""
+
+    if not root.is_absolute():
+        raise ComposeError(f"RuleSpec checkout must be an absolute path: {root}")
+    if root.is_symlink() or not root.is_dir():
+        raise ComposeError(f"RuleSpec checkout must be a real directory: {root}")
+    try:
+        resolved = root.resolve(strict=True)
+    except OSError as exc:
+        raise ComposeError(f"RuleSpec checkout does not exist: {root}") from exc
+    if resolved != root or not _path_uses_exact_directory_entry_casing(root):
+        raise ComposeError(f"RuleSpec checkout path must not contain aliases: {root}")
+
+    match = _COUNTRY_CHECKOUT_RE.fullmatch(root.name)
+    if match is None:
+        raise ComposeError(
+            "expected exact country checkout named rulespec-<country>; "
+            f"got {root.name!r}"
+        )
+    country = match.group("country")
+
+    legacy_roots = [
+        root / marker
+        for marker in _FILESYSTEM_ROOTS
+        if (root / marker).exists() or (root / marker).is_symlink()
     ]
-    if jurisdiction_dirs:
-        roots = []
-        if _has_rulespec_content_files(root):
-            roots.append((country, root))
-        roots.extend(jurisdiction_dirs)
-        return roots
-    if any((root / marker).is_dir() for marker in _CONTENT_MARKER_DIRS):
-        return [(country, root)]
-    return [(country, root)]
+    if legacy_roots:
+        rendered = ", ".join(path.name for path in legacy_roots)
+        raise ComposeError(
+            "repository-root RuleSpec content is not canonical; move it under "
+            f"a direct jurisdiction root: {rendered}"
+        )
 
-
-def _has_rulespec_content_files(root: Path) -> bool:
-    """Whether root-level content marker dirs contain actual RuleSpec modules.
-
-    Empty marker directories can remain in a country monorepo after content is
-    moved under jurisdiction directories. They should not make the loader treat
-    the whole monorepo as one standalone jurisdiction.
-    """
-
-    for marker in _CONTENT_MARKER_DIRS:
-        directory = root / marker
-        if not directory.is_dir():
+    jurisdictions: list[tuple[str, Path]] = []
+    for child in sorted(root.iterdir()):
+        if child.is_symlink():
+            raise ComposeError(f"RuleSpec checkout contains a symlink: {child}")
+        if not child.is_dir():
             continue
-        for path in sorted(directory.rglob("*.yml")) + sorted(
-            directory.rglob("*.yaml")
+        has_content_root = any(
+            (child / marker).exists() or (child / marker).is_symlink()
+            for marker in _FILESYSTEM_ROOTS
+        )
+        if not has_content_root:
+            continue
+        if _JURISDICTION_DIR_RE.fullmatch(child.name) is None or not (
+            child.name == country or child.name.startswith(f"{country}-")
         ):
-            if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
-                continue
-            return True
-    return False
+            raise ComposeError(
+                f"noncanonical jurisdiction directory in {root.name}: {child.name}"
+            )
+        _validate_jurisdiction_tree(child)
+        jurisdictions.append((child.name, child))
+
+    if not jurisdictions:
+        raise ComposeError(f"{root}: no canonical jurisdiction content roots found")
+    return jurisdictions
+
+
+def _validate_jurisdiction_tree(jurisdiction: Path) -> None:
+    """Reject aliases, special YAML paths, and the removed .yml spelling."""
+
+    for marker in _FILESYSTEM_ROOTS:
+        content_root = jurisdiction / marker
+        if not content_root.exists() and not content_root.is_symlink():
+            continue
+        if content_root.is_symlink() or not content_root.is_dir():
+            raise ComposeError(
+                f"canonical content root must be a real directory: {content_root}"
+            )
+        for path in sorted(content_root.rglob("*")):
+            if path.is_symlink():
+                raise ComposeError(f"RuleSpec content contains a symlink: {path}")
+            yaml_like = path.suffix.lower() in {".yaml", ".yml"}
+            if yaml_like and not path.is_file():
+                raise ComposeError(f"RuleSpec YAML path must be a regular file: {path}")
+            if path.is_file() and yaml_like and path.suffix != ".yaml":
+                raise ComposeError(
+                    f"RuleSpec files must use the exact .yaml extension: {path}"
+                )
 
 
 def load_corpus_from_roots(
@@ -408,28 +509,55 @@ def load_corpus_from_roots(
     corpus_sha: str | None = None,
     concept_registry: ConceptRegistryLike | None = None,
 ) -> CorpusState:
-    """Load and index all RuleSpec modules under rulespec-style repo roots.
+    """Load atomic RuleSpec modules from exact country-monorepo checkouts."""
 
-    Each root may be a legacy standalone jurisdiction repo or a country
-    monorepo (see `_jurisdiction_roots`). This is an I/O helper for
-    startup/cache-building code. The pure composition function does not
-    call it.
-    """
-
+    if not roots:
+        raise ComposeError(
+            "at least one explicit rulespec-<country> checkout is required"
+        )
     modules: dict[str, RuleSpecModule] = {}
-    for root in roots:
-        root = Path(root)
-        for prefix, content_root in _jurisdiction_roots(root):
-            for path in sorted(content_root.rglob("*.yml")) + sorted(
-                content_root.rglob("*.yaml")
-            ):
-                if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
+    seen_roots: set[Path] = set()
+    seen_countries: set[str] = set()
+    for raw_root in roots:
+        root = Path(raw_root)
+        if root in seen_roots:
+            raise ComposeError(f"duplicate RuleSpec checkout: {root}")
+        seen_roots.add(root)
+        country = root.name.removeprefix("rulespec-")
+        if country in seen_countries:
+            raise ComposeError(f"duplicate RuleSpec country checkout: {country}")
+        seen_countries.add(country)
+        for prefix, jurisdiction_root in _canonical_jurisdiction_roots(root):
+            for marker in _ATOMIC_RULESPEC_ROOTS:
+                content_root = jurisdiction_root / marker
+                if not content_root.is_dir():
                     continue
-                target = _target_for_repo_file(prefix, content_root, path)
-                payload = yaml.safe_load(path.read_text()) or {}
-                if not isinstance(payload, Mapping):
-                    raise ComposeError(f"{path}: module root must be a mapping")
-                modules[target] = module_from_payload(target, payload)
+                for path in sorted(content_root.rglob("*.yaml")):
+                    if path.name.endswith(".test.yaml"):
+                        continue
+                    target = _target_for_repo_file(prefix, jurisdiction_root, path)
+                    payload = yaml.safe_load(path.read_text()) or {}
+                    if not isinstance(payload, Mapping):
+                        raise ComposeError(f"{path}: module root must be a mapping")
+                    if payload.get("format") != "rulespec/v1":
+                        raise ComposeError(
+                            f"{path}: atomic module must declare format: rulespec/v1"
+                        )
+                    module = payload.get("module")
+                    if isinstance(module, Mapping) and "kind" in module:
+                        raise ComposeError(
+                            f"{path}: atomic modules must not declare module.kind; "
+                            "composition belongs under programs/"
+                        )
+                    if target in modules:
+                        raise ComposeError(
+                            f"duplicate RuleSpec module target: {target}"
+                        )
+                    modules[target] = module_from_payload(target, payload)
+    if not modules:
+        raise ComposeError(
+            "explicit RuleSpec checkouts contain no atomic rulespec/v1 modules"
+        )
     return with_corpus_index(
         CorpusState(
             modules=modules,
@@ -556,15 +684,16 @@ def _resolve_producer_in_context(
 def _allowed_prefixes_for_program(
     program: str, corpus_state: CorpusState, *, explicit: tuple[str, ...]
 ) -> tuple[str, ...]:
+    program_prefix = program.split("/", 1)[0] if program else ""
+    country_prefix = program_prefix.split("-", 1)[0] if program_prefix else ""
     if explicit:
-        return _dedupe((*explicit, "us"))
+        return _dedupe((*explicit, country_prefix))
     if not program:
         prefixes = tuple(
             _target_prefix(target) for target in sorted(corpus_state.modules)
         )
-        return _dedupe(("us", *prefixes))
-    program_prefix = program.split("/", 1)[0]
-    return _dedupe((program_prefix, "us"))
+        return _dedupe(prefixes)
+    return _dedupe((program_prefix, country_prefix))
 
 
 def _assert_scope_roots_in_corpus(
@@ -594,26 +723,40 @@ def _scope_target(program: str, scope_name: str, path: str) -> str:
 def _scope_prefix(program: str, scope_name: str) -> str:
     normalized = scope_name.strip()
     if normalized == "federal":
-        return "us"
+        return program.split("/", 1)[0].split("-", 1)[0]
     if normalized == "state":
         return program.split("/", 1)[0]
     return normalized
 
 
 def _normalize_import(target: str) -> str:
-    prefix, separator, path = target.strip().partition(":")
-    if not separator or not prefix or not path:
+    """Validate an absolute atomic import ref and return its module target.
+
+    Atomic modules may import one exact rule via ``#fragment``. Composition
+    indexes and emitted root imports operate on modules, so the validated
+    fragment is intentionally removed from the returned lookup target.
+    """
+
+    if not isinstance(target, str) or target != target.strip():
         raise ComposeError(f"invalid RuleSpec import target: {target!r}")
-    return f"{prefix}:{path.strip().strip('/')}"
-
-
-def _repo_prefix(root: Path) -> str:
-    name = root.name
-    if name.startswith("rulespec-"):
-        return name.removeprefix("rulespec-")
-    if name.startswith("rules-"):
-        return name.removeprefix("rules-")
-    raise ComposeError(f"{root}: expected repo name rulespec-<prefix>")
+    if "\\" in target or target.count("#") > 1:
+        raise ComposeError(f"invalid RuleSpec import target: {target!r}")
+    module_target, has_fragment, fragment = target.partition("#")
+    if has_fragment and _IMPORT_FRAGMENT_RE.fullmatch(fragment) is None:
+        raise ComposeError(f"invalid RuleSpec import fragment: {target!r}")
+    if module_target.count(":") != 1:
+        raise ComposeError(f"invalid RuleSpec import target: {target!r}")
+    prefix, path = module_target.split(":", 1)
+    segments = path.split("/")
+    if (
+        _IMPORT_PREFIX_RE.fullmatch(prefix) is None
+        or not path
+        or path.endswith((".yaml", ".yml"))
+        or any(_IMPORT_SEGMENT_RE.fullmatch(segment) is None for segment in segments)
+        or segments[0] not in _ATOMIC_RULESPEC_ROOTS
+    ):
+        raise ComposeError(f"invalid canonical atomic import target: {target!r}")
+    return module_target
 
 
 def _target_for_repo_file(prefix: str, root: Path, path: Path) -> str:
@@ -690,7 +833,7 @@ _HOUSEHOLD_GATE_SUFFIXES: tuple[str, ...] = (
 
 
 def _filter_to_household_gate_candidates(
-    candidates: list[str], output_name: str, program_token: str
+    candidates: list[str], program_token: str
 ) -> list[str]:
     """Return only names that look like a top-level household eligibility
     gate AND belong to the same program as the output being gated.
@@ -703,24 +846,17 @@ def _filter_to_household_gate_candidates(
     ``spec.program`` so cross-program rules (e.g. ``ctc_*`` in a SNAP
     program's shared scope) are still rejected.
 
-    Both the program token and the legacy output-derived prefix are
-    accepted to preserve compatibility with bench specs that don't set
-    ``program`` explicitly (existing tests rely on the output-prefix
-    fallback)."""
-    tokens: list[str] = []
-    if program_token:
-        tokens.append(program_token)
-    output_prefix = _program_prefix(output_name).rstrip("_")
-    if output_prefix and output_prefix not in tokens:
-        tokens.append(output_prefix)
-    if not tokens:
+    ``ProgramSpec.program`` is the sole program identity; output-name
+    heuristics are intentionally not accepted as a second namespace."""
+    if not program_token:
         return []
 
     def belongs(name: str) -> bool:
-        for tok in tokens:
-            if name == tok or name.startswith(f"{tok}_") or f"_{tok}_" in name:
-                return True
-        return False
+        return (
+            name == program_token
+            or name.startswith(f"{program_token}_")
+            or f"_{program_token}_" in name
+        )
 
     return [
         name
@@ -728,13 +864,6 @@ def _filter_to_household_gate_candidates(
         if belongs(name)
         and any(name.endswith(suffix) for suffix in _HOUSEHOLD_GATE_SUFFIXES)
     ]
-
-
-def _program_prefix(name: str) -> str:
-    """Return ``"<root>_"`` from a snake_case name (e.g. snap_eligible -> snap_)."""
-    if "_" not in name:
-        return ""
-    return name.split("_", 1)[0] + "_"
 
 
 def _minimal_cover(
@@ -751,12 +880,12 @@ def _minimal_cover(
     Keeping only rules that no other candidate reaches preserves the
     rulespec's encoded OR-structure inside each gated rollup."""
 
-    from .coverage import _transitive_dependencies
+    from .coverage import transitive_dependencies
 
     candidate_set = set(candidates)
     dominated: set[str] = set()
     for cand in candidates:
-        deps = _transitive_dependencies(cand, rules_by_name)
+        deps = transitive_dependencies(cand, rules_by_name)
         for dep in deps:
             if dep != cand and dep in candidate_set:
                 dominated.add(dep)
@@ -831,7 +960,7 @@ def _apply_auto_gate_outputs(
         # failure 2026-05-28: 0/8 cases evaluated when 9 unrelated rules
         # were pulled in).
         gate_uncovered = _filter_to_household_gate_candidates(
-            uncovered, name, _program_token(spec.program)
+            uncovered, _program_token(spec.program)
         )
         # Reduce to minimal cover: drop any candidate that's reachable
         # via another candidate's dependency tree. The rulespec already

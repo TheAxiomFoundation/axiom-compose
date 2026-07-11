@@ -28,8 +28,17 @@ their environment, but the resulting state is explicit input.
 ## Corpus Index
 
 Producer discovery is a startup/cache concern, not per-query work. A consumer
-loads `rulespec-*` roots with `load_corpus_from_roots(...)` or otherwise builds
-a `CorpusState`, then attaches a `CorpusIndex` with `with_corpus_index(...)`.
+loads explicit canonical `rulespec-<country>` checkouts with
+`load_corpus_from_roots(...)` or otherwise builds a `CorpusState`, then attaches
+a `CorpusIndex` with `with_corpus_index(...)`.
+
+The filesystem contract has five jurisdiction content roots:
+`legislation/`, `policies/`, `programs/`, `regulations/`, and `statutes/`.
+Only the four non-`programs/` roots contain atomic `rulespec/v1` modules and are
+eligible for corpus indexing. `programs/` contains declarative ProgramSpecs,
+which are loaded explicitly and passed to the composer. The loader accepts only
+absolute, unaliased checkouts named exactly `rulespec-<country>`, direct matching
+jurisdictions, regular `.yaml` files, and explicit caller-supplied roots.
 
 The index records:
 
@@ -58,3 +67,7 @@ does not duplicate the registry or introduce a new identifier scheme.
 The output is ordinary RuleSpec YAML with canonical `prefix:path` imports. The
 engine remains responsible for resolving those imports against `rulespec-*`
 checkouts.
+
+Filesystem output is deliberately external to those checkouts. The CLI rejects
+relative, aliased, non-`.yaml`, or in-checkout destinations so generated
+composition artifacts cannot be mistaken for atomic law or ProgramSpecs.

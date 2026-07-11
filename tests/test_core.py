@@ -9,13 +9,22 @@ ROOT = Path(__file__).parent
 def test_dependency_closure_is_deterministic_depth_first():
     corpus = CorpusState(
         modules={
-            "us:a": RuleSpecModule(target="us:a", imports=("us:c", "us:b")),
-            "us:b": RuleSpecModule(target="us:b", imports=("us:c",)),
-            "us:c": RuleSpecModule(target="us:c"),
+            "us:policies/a": RuleSpecModule(
+                target="us:policies/a",
+                imports=("us:policies/c", "us:policies/b"),
+            ),
+            "us:policies/b": RuleSpecModule(
+                target="us:policies/b", imports=("us:policies/c",)
+            ),
+            "us:policies/c": RuleSpecModule(target="us:policies/c"),
         }
     )
 
-    assert dependency_closure(("us:a",), corpus) == ("us:a", "us:c", "us:b")
+    assert dependency_closure(("us:policies/a",), corpus) == (
+        "us:policies/a",
+        "us:policies/c",
+        "us:policies/b",
+    )
 
 
 def test_compose_matches_golden_fixture():
@@ -47,7 +56,7 @@ def test_auto_gate_wraps_output_with_uncovered_eligibility_rules():
     from axiom_compose.spec import ProgramSpec, TransformationSpec
 
     spec = ProgramSpec(
-        program="us-ca/snap",
+        program="us-ca/widget",
         period="2026-01",
         outputs=("widget_eligible",),
         scope={"federal": ("statutes/x/1",)},
