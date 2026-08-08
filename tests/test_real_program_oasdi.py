@@ -100,9 +100,7 @@ def _run_axiom_oasdi_case(tmp_path: Path) -> float:
             "main forbids (layout migration, axiom-compose#28)"
         )
     if completed.returncode:
-        raise AssertionError(
-            f"compile-composed failed:\n{completed.stderr[-2000:]}"
-        )
+        raise AssertionError(f"compile-composed failed:\n{completed.stderr[-2000:]}")
     completed = subprocess.run(
         [
             "cargo",
