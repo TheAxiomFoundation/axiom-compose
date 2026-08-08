@@ -540,15 +540,23 @@ def load_corpus_from_roots(
         for prefix, content_root in _jurisdiction_roots(root):
             for path in _iter_module_files(content_root):
                 target = _target_for_repo_file(prefix, content_root, path)
-                previous = loaded_from.get(target)
-                if previous is not None and previous != path:
-                    raise ComposeError(
-                        f"module target {target!r} loaded from two files: "
-                        f"{previous} and {path}"
-                    )
                 payload = yaml.safe_load(path.read_text()) or {}
                 if not isinstance(payload, Mapping):
                     raise ComposeError(f"{path}: module root must be a mapping")
+                previous = loaded_from.get(target)
+                if previous is not None and previous != path:
+                    # Identical content under the same target is tolerated:
+                    # during the monorepo transition a country checkout and
+                    # its archived legacy sibling legitimately carry the
+                    # same modules. Diverging content stays a hard error
+                    # (#24 — .yml vs .yaml shadowing, stale duplicate
+                    # checkouts).
+                    if modules[target].payload != payload:
+                        raise ComposeError(
+                            f"module target {target!r} loaded from two files "
+                            f"with different content: {previous} and {path}"
+                        )
+                    continue
                 modules[target] = module_from_payload(target, payload)
                 loaded_from[target] = path
     return with_corpus_index(

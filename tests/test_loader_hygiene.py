@@ -72,3 +72,23 @@ def test_monorepo_root_sweep_does_not_ingest_state_dirs_as_federal(tmp_path):
     assert "us:policies/base" in corpus.modules
     assert "us-ca:policies/snap" in corpus.modules
     assert "us:us-ca/policies/snap" not in corpus.modules
+
+
+def test_identical_content_across_monorepo_and_legacy_roots_is_tolerated(tmp_path):
+    # Monorepo-transition configuration: rulespec-us carries us-ca/ AND the
+    # archived rulespec-us-ca checkout is still on disk with byte-identical
+    # content. Loading both must work; only DIVERGING content collides.
+    monorepo = tmp_path / "rulespec-us"
+    legacy = tmp_path / "rulespec-us-ca"
+    content = MODULE.format(name="snap_benefit")
+    _write(monorepo / "us-ca" / "policies/snap.yaml", content)
+    _write(monorepo / "us" / "policies/base.yaml", MODULE.format(name="base"))
+    _write(legacy / "policies/snap.yaml", content)
+
+    corpus = load_corpus_from_roots([monorepo, legacy])
+
+    assert "us-ca:policies/snap" in corpus.modules
+
+    _write(legacy / "policies/snap.yaml", MODULE.format(name="diverged"))
+    with pytest.raises(ComposeError, match="different content"):
+        load_corpus_from_roots([monorepo, legacy])
