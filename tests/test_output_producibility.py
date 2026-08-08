@@ -72,9 +72,11 @@ def test_unresolved_transitive_import_fails_instead_of_surfacing_in_engine():
         compose(spec, corpus)
 
 
-def test_auto_gating_a_corpus_produced_output_is_a_hard_error():
-    # #20: previously a silent no-op that also exempted the output from
-    # the coverage assertion — the exact trap auto-gate was built to close.
+def test_auto_gating_a_corpus_produced_output_gets_no_coverage_exemption():
+    # #20: previously a silent no-op that ALSO exempted the output from
+    # the coverage assertion — the exact trap auto-gate was built to
+    # close. The gate cannot rewrite corpus-produced rules, so the output
+    # keeps its full coverage obligation: uncovered gates fail loudly.
     corpus = with_corpus_index(
         CorpusState(
             modules={
@@ -99,5 +101,5 @@ def test_auto_gating_a_corpus_produced_output_is_a_hard_error():
         }
     )
 
-    with pytest.raises(ComposeError, match="corpus-produced.*snap_eligible"):
+    with pytest.raises(ComposeError, match="does not reference.*eligibility"):
         compose(spec, corpus)

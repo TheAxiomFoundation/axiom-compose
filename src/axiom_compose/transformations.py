@@ -7,6 +7,7 @@ or program family.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Mapping
 from typing import Any
 
@@ -51,8 +52,13 @@ def all_of(parameters: Mapping[str, Any]) -> Rule:
 
     name = _identifier(parameters, "name")
     conditions = _identifiers(parameters, "conditions")
-    formula = " and ".join(conditions) if conditions else "true"
-    return _base_rule(parameters, name=name, dtype="Judgment", formula=formula)
+    if not conditions:
+        # An empty conjunction would compose a vacuously-always-true
+        # eligibility output without complaint (#26).
+        raise TransformationError("all_of requires at least one condition")
+    return _base_rule(
+        parameters, name=name, dtype="Judgment", formula=" and ".join(conditions)
+    )
 
 
 def any_of(parameters: Mapping[str, Any]) -> Rule:
@@ -60,8 +66,11 @@ def any_of(parameters: Mapping[str, Any]) -> Rule:
 
     name = _identifier(parameters, "name")
     conditions = _identifiers(parameters, "conditions")
-    formula = " or ".join(conditions) if conditions else "false"
-    return _base_rule(parameters, name=name, dtype="Judgment", formula=formula)
+    if not conditions:
+        raise TransformationError("any_of requires at least one condition")
+    return _base_rule(
+        parameters, name=name, dtype="Judgment", formula=" or ".join(conditions)
+    )
 
 
 def any_related(parameters: Mapping[str, Any]) -> Rule:
@@ -83,6 +92,11 @@ def conditional_value(parameters: Mapping[str, Any]) -> Rule:
     when_false = parameters.get("when_false", 0)
     if isinstance(when_false, str):
         else_formula = _identifier({"when_false": when_false}, "when_false")
+    elif isinstance(when_false, bool):
+        # bool is a subclass of int: YAML `when_false: true` would
+        # otherwise emit Python's `True`, which is not a RuleSpec
+        # literal (#26).
+        raise TransformationError("when_false must be an identifier or number")
     elif isinstance(when_false, int | float):
         else_formula = str(when_false)
     else:
@@ -254,9 +268,14 @@ def _string(
     return value.strip()
 
 
+_IDENTIFIER_RE = re.compile(r"^[a-z][a-z0-9_]*$")
+
+
 def _identifier(parameters: Mapping[str, Any], key: str) -> str:
     value = _string(parameters, key)
-    if not value.replace("_", "a").isalnum() or not value[0].islower():
+    # Match the RuleSpec grammar exactly — str.isalnum() accepts mixed
+    # case and unicode letters the engine rejects (#26).
+    if not _IDENTIFIER_RE.match(value):
         raise TransformationError(f"{key} must be a RuleSpec identifier")
     return value
 

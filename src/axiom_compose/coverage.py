@@ -50,20 +50,25 @@ _IDENT_RE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 
 # Identifiers that look like rule references but actually aren't — generic
 # language keywords plus engine relation/aggregation primitives. Anything
-# in this set is dropped when extracting formula dependencies.
-_FORMULA_KEYWORDS = frozenset(
+# in this set is dropped when extracting formula dependencies. This is the
+# single canonical list: core's dependency inference imports it too, so the
+# two analyzers cannot drift apart again (#26).
+FORMULA_KEYWORDS = frozenset(
     {
         "and",
         "or",
         "not",
         "if",
         "else",
+        "match",
         "true",
         "false",
         "null",
         "in",
         "min",
         "max",
+        "ceil",
+        "floor",
         "len",
         "sum",
         "count",
@@ -74,6 +79,9 @@ _FORMULA_KEYWORDS = frozenset(
         "member_of_household",  # relation, not a rule
     }
 )
+
+# Backwards-compatible alias for the pre-#26 private name.
+_FORMULA_KEYWORDS = FORMULA_KEYWORDS
 
 
 def find_uncovered_eligibility_rules(
@@ -90,9 +98,17 @@ def find_uncovered_eligibility_rules(
     analyzer treats them uniformly.
     """
     reachable = _transitive_dependencies(output, rules_by_name)
-    eligibility = {
-        name for name in rules_by_name if any(marker in name for marker in markers)
-    }
+    eligibility = set()
+    for name, rule in rules_by_name.items():
+        if not any(marker in name for marker in markers):
+            continue
+        dtype = rule.get("dtype") if isinstance(rule, Mapping) else None
+        if dtype is not None and dtype != "Judgment":
+            # A Money/Count value whose name carries an eligibility marker
+            # (`*_income_limit`, `*_resource_limit`) is a parameter a gate
+            # consults, not a gate the output must AND in.
+            continue
+        eligibility.add(name)
     return sorted(eligibility - reachable - {output})
 
 
