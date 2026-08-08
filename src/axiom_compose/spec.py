@@ -33,8 +33,8 @@ class ProgramSpec:
     transformations: tuple[TransformationSpec, ...] = field(default_factory=tuple)
     # Outputs whose eligibility-coverage check is intentionally disabled.
     # Useful for bootstrap iterations that ship a deliberately partial
-    # eligibility chain. Each acknowledged output gets a compose warning
-    # but no error. Listed by output rule name (matches `outputs`).
+    # eligibility chain. Structured data (not a comment) so partiality
+    # shows up in audits. Listed by output rule name (matches `outputs`).
     acknowledged_incomplete: tuple[str, ...] = field(default_factory=tuple)
     # Output rules to AND-gate with discovered uncovered eligibility-shaped
     # rules from scope. Compose renames the original `<name>` rule to
@@ -43,12 +43,30 @@ class ProgramSpec:
     # list household income/resource gates in every state spec.
     auto_gate_outputs: tuple[str, ...] = field(default_factory=tuple)
 
+    KNOWN_KEYS = frozenset(
+        {
+            "program",
+            "period",
+            "outputs",
+            "scope",
+            "rounding",
+            "transformations",
+            "acknowledged_incomplete",
+            "auto_gate_outputs",
+        }
+    )
+
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ProgramSpec":
         required = ("program", "period", "outputs")
         missing = [key for key in required if key not in raw]
         if missing:
             raise SpecError(f"missing required spec keys: {', '.join(missing)}")
+        # A misspelled key (`auto_gate_output:`) must not silently disable
+        # the feature it meant to enable (#25).
+        unknown = sorted(str(key) for key in raw if key not in cls.KNOWN_KEYS)
+        if unknown:
+            raise SpecError(f"unknown spec keys: {', '.join(unknown)}")
 
         program = _non_empty_string(raw["program"], "program")
         period = _non_empty_string(raw["period"], "period")
@@ -59,6 +77,16 @@ class ProgramSpec:
         scope_raw = raw.get("scope") or {}
         if not isinstance(scope_raw, Mapping):
             raise SpecError("scope must be a mapping")
+        # Reserved-but-unimplemented scope filters must not be silently
+        # accepted: a spec using `exclude:` would get the module anyway (#25).
+        unimplemented = sorted(
+            key for key in ("include", "exclude") if key in scope_raw
+        )
+        if unimplemented:
+            raise SpecError(
+                "scope keys are reserved but not implemented: "
+                + ", ".join(unimplemented)
+            )
         scope = {
             _non_empty_string(key, "scope key"): _string_tuple(value, f"scope.{key}")
             for key, value in scope_raw.items()
@@ -75,6 +103,14 @@ class ProgramSpec:
         if "acknowledged_incomplete" in raw:
             acknowledged_incomplete = _string_tuple(
                 raw["acknowledged_incomplete"], "acknowledged_incomplete"
+            )
+        unknown_acknowledged = [
+            name for name in acknowledged_incomplete if name not in outputs
+        ]
+        if unknown_acknowledged:
+            raise SpecError(
+                "acknowledged_incomplete not in outputs: "
+                + ", ".join(unknown_acknowledged)
             )
 
         raw_auto_gate = raw.get("auto_gate_outputs") or ()
@@ -128,6 +164,8 @@ class ProgramSpec:
             ]
         if self.acknowledged_incomplete:
             payload["acknowledged_incomplete"] = list(self.acknowledged_incomplete)
+        if self.auto_gate_outputs:
+            payload["auto_gate_outputs"] = list(self.auto_gate_outputs)
         return payload
 
 
