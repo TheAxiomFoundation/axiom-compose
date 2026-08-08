@@ -70,3 +70,34 @@ def test_unresolved_transitive_import_fails_instead_of_surfacing_in_engine():
 
     with pytest.raises(ComposeError, match="do not resolve.*us:snap/tables"):
         compose(spec, corpus)
+
+
+def test_auto_gating_a_corpus_produced_output_is_a_hard_error():
+    # #20: previously a silent no-op that also exempted the output from
+    # the coverage assertion — the exact trap auto-gate was built to close.
+    corpus = with_corpus_index(
+        CorpusState(
+            modules={
+                "us:snap/eligibility": _module(
+                    "us:snap/eligibility",
+                    rules=[
+                        _rule("snap_eligible", "snap_member_eligible"),
+                        _rule("snap_member_eligible", "true"),
+                        _rule("snap_income_eligible", "true"),
+                    ],
+                )
+            }
+        )
+    )
+    spec = ProgramSpec.from_mapping(
+        {
+            "program": "us/snap",
+            "period": "2026-01",
+            "outputs": ["snap_eligible"],
+            "auto_gate_outputs": ["snap_eligible"],
+            "scope": {"federal": ["snap/eligibility"]},
+        }
+    )
+
+    with pytest.raises(ComposeError, match="corpus-produced.*snap_eligible"):
+        compose(spec, corpus)

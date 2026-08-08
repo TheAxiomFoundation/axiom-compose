@@ -898,21 +898,29 @@ def _apply_auto_gate_outputs(
     if not spec.auto_gate_outputs:
         return rules
 
-    rules_by_name: dict[str, Mapping[str, Any]] = {}
-    for target in imports:
-        module = corpus_state.modules.get(target)
-        if module is None:
-            continue
-        for rule in module.payload.get("rules") or ():
-            if not isinstance(rule, Mapping):
-                continue
-            name = rule.get("name")
-            if isinstance(name, str) and name and name not in rules_by_name:
-                rules_by_name[name] = rule
-    for rule in rules:
-        name = rule.get("name") if isinstance(rule, Mapping) else None
-        if isinstance(name, str) and name:
-            rules_by_name[name] = rule
+    # The gate mechanism rewrites the output rule (rename to <name>_core,
+    # synthesize a wrapper). Compose cannot rewrite rules inside imported
+    # corpus modules, so auto-gating a corpus-produced output would be a
+    # silent no-op that simultaneously exempted the output from the
+    # coverage assertion (#20). Refuse instead: the gate belongs in the
+    # corpus module, or the output belongs to a spec transformation.
+    # Module-less corpus states (pattern-synthesis fixtures) keep the
+    # documented empty-corpus no-op behavior.
+    spec_rule_names = {
+        rule.get("name") for rule in rules if isinstance(rule, Mapping)
+    }
+    unmatched = sorted(
+        name for name in spec.auto_gate_outputs if name not in spec_rule_names
+    )
+    if unmatched and corpus_state.modules:
+        raise ComposeError(
+            "auto_gate_outputs must name rules synthesized by this spec's "
+            "transformations; corpus-produced outputs cannot be auto-gated "
+            "(encode the gate in the corpus module or define the output as "
+            "a spec transformation): " + ", ".join(unmatched)
+        )
+
+    rules_by_name = _rules_in_scope(imports, corpus_state, rules)
 
     new_rules: list[Mapping[str, Any]] = []
     for rule in rules:
