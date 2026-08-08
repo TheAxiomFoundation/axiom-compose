@@ -352,6 +352,49 @@ def load_corpus_state(
 _JURISDICTION_DIR_RE = re.compile(r"^[a-z]{2}(-[a-z0-9-]+)*$")
 _CONTENT_MARKER_DIRS = ("statutes", "regulations", "policies", "legislation", "sources")
 
+# Directories that never contain atomic RuleSpec modules. `programs/` holds
+# compose specs (the engine forbids programs/ import targets); dot- and
+# underscore-prefixed directories hold CI config, manifests, and prior
+# compose outputs (`.github/`, `.axiom/`, `_compose/`).
+_NON_MODULE_DIRS = frozenset({"programs"})
+
+
+def _is_module_dir(name: str) -> bool:
+    return not (
+        name.startswith(".") or name.startswith("_") or name in _NON_MODULE_DIRS
+    )
+
+
+def _iter_module_files(content_root: Path) -> list[Path]:
+    """RuleSpec module files under one jurisdiction content root.
+
+    Only descends into module-bearing child directories: dotdirs,
+    underscore dirs, `programs/`, and jurisdiction-patterned dirs
+    (`us-xx/` — those belong to their own prefix) are never ingested,
+    so a monorepo root sweep cannot index another state's law as its
+    own (#19) and prior compose outputs / CI config never become
+    producers.
+    """
+
+    files: list[Path] = []
+    for child in sorted(content_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if not _is_module_dir(child.name):
+            continue
+        if _JURISDICTION_DIR_RE.match(child.name):
+            continue
+        for path in sorted(child.rglob("*.yml")) + sorted(child.rglob("*.yaml")):
+            if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
+                continue
+            if path.name.startswith("."):
+                continue
+            relative_parts = path.relative_to(child).parts[:-1]
+            if any(not _is_module_dir(part) for part in relative_parts):
+                continue
+            files.append(path)
+    return files
+
 
 def _jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
     """(prefix, content root) pairs for one checkout.
@@ -417,19 +460,25 @@ def load_corpus_from_roots(
     """
 
     modules: dict[str, RuleSpecModule] = {}
+    loaded_from: dict[str, Path] = {}
     for root in roots:
         root = Path(root)
+        if not root.is_dir():
+            raise ComposeError(f"{root}: rulespec root does not exist")
         for prefix, content_root in _jurisdiction_roots(root):
-            for path in sorted(content_root.rglob("*.yml")) + sorted(
-                content_root.rglob("*.yaml")
-            ):
-                if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
-                    continue
+            for path in _iter_module_files(content_root):
                 target = _target_for_repo_file(prefix, content_root, path)
+                previous = loaded_from.get(target)
+                if previous is not None and previous != path:
+                    raise ComposeError(
+                        f"module target {target!r} loaded from two files: "
+                        f"{previous} and {path}"
+                    )
                 payload = yaml.safe_load(path.read_text()) or {}
                 if not isinstance(payload, Mapping):
                     raise ComposeError(f"{path}: module root must be a mapping")
                 modules[target] = module_from_payload(target, payload)
+                loaded_from[target] = path
     return with_corpus_index(
         CorpusState(
             modules=modules,

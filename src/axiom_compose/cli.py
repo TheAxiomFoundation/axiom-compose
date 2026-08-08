@@ -55,11 +55,16 @@ def _collect_rulespec_roots(cli_roots: list[Path]) -> list[Path]:
             raw = raw.strip()
             if raw:
                 roots.append(Path(raw))
+    missing = [str(root) for root in roots if not root.exists()]
+    if missing:
+        # A typo'd root must not silently degrade the corpus — discovery
+        # would fall back to another jurisdiction's producer (#24).
+        raise SystemExit(
+            "rulespec roots do not exist: " + ", ".join(sorted(missing))
+        )
     seen: set[Path] = set()
     deduped: list[Path] = []
     for root in roots:
-        if not root.exists():
-            continue
         resolved = root.resolve()
         if resolved in seen:
             continue
