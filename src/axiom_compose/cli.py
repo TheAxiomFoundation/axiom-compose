@@ -30,10 +30,16 @@ def main(argv: list[str] | None = None) -> int:
     )
     args = parser.parse_args(argv)
 
-    spec = load_spec(args.spec_path)
-    roots = _collect_rulespec_roots(args.rulespec_root)
-    corpus = load_corpus_from_roots(roots) if roots else CorpusState()
-    program = compose(spec, corpus)
+    try:
+        spec = load_spec(args.spec_path)
+        roots = _collect_rulespec_roots(args.rulespec_root)
+        corpus = load_corpus_from_roots(roots) if roots else CorpusState()
+        program = compose(spec, corpus)
+    except ValueError as error:
+        # ComposeError/SpecError/TransformationError are all ValueErrors —
+        # a clean diagnostic beats a traceback for spec authors.
+        print(f"axiom-compose: {error}", file=sys.stderr)
+        return 2
     if args.output is None:
         sys.stdout.buffer.write(program.source)
     else:
@@ -55,11 +61,8 @@ def _collect_rulespec_roots(cli_roots: list[Path]) -> list[Path]:
             raw = raw.strip()
             if raw:
                 roots.append(Path(raw))
-    missing = [str(root) for root in roots if not root.exists()]
-    if missing:
-        # A typo'd root must not silently degrade the corpus — discovery
-        # would fall back to another jurisdiction's producer (#24).
-        raise SystemExit("rulespec roots do not exist: " + ", ".join(sorted(missing)))
+    # Missing roots are rejected by load_corpus_from_roots — the single
+    # authority — so a typo'd root cannot silently degrade the corpus (#24).
     seen: set[Path] = set()
     deduped: list[Path] = []
     for root in roots:

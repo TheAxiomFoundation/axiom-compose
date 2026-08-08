@@ -92,3 +92,18 @@ def test_identical_content_across_monorepo_and_legacy_roots_is_tolerated(tmp_pat
     _write(legacy / "policies/snap.yaml", MODULE.format(name="diverged"))
     with pytest.raises(ComposeError, match="different content"):
         load_corpus_from_roots([monorepo, legacy])
+
+
+def test_legacy_repo_jurisdiction_lookalike_dirs_and_root_files_load(tmp_path):
+    # Review regression: `ui/` and `id/` match the jurisdiction dir
+    # pattern but are ordinary content dirs in a legacy standalone repo,
+    # and loose module YAML directly at the content root must not be
+    # silently dropped.
+    root = tmp_path / "rulespec-uk"
+    _write(root / "ui/sub/mod.yaml", MODULE.format(name="ui_amount"))
+    _write(root / "rootmod.yaml", MODULE.format(name="root_amount"))
+
+    corpus = load_corpus_from_roots([root])
+
+    assert "uk:ui/sub/mod" in corpus.modules
+    assert "uk:rootmod" in corpus.modules

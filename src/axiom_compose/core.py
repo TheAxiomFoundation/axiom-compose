@@ -224,37 +224,45 @@ def _assert_eligibility_coverage(
         _transitive_dependencies,
         find_uncovered_eligibility_rules,
         format_coverage_error,
+        is_judgment_shaped,
     )
 
     acknowledged = set(spec.acknowledged_incomplete) | set(gated_outputs)
-    # An output that another *eligibility* output already reaches is a
-    # component the program also happens to expose (e.g.
-    # `ak_atap_resources_eligible` alongside the `ak_atap_eligible`
-    # rollup), not a top-level gate — coverage polices the rollups. Only
-    # eligibility-shaped siblings confer the skip: snap_benefit reaching
-    # snap_eligible must not exempt snap_eligible, or the original CA
-    # over-permissiveness trap reopens via the benefit chain.
-    reached_by_siblings: set[str] = set()
-    for output in spec.outputs:
-        if not any(marker in output for marker in ELIGIBILITY_MARKERS):
-            continue
-        deps = _transitive_dependencies(output, rules_by_name)
-        deps.discard(output)
-        reached_by_siblings |= deps
+    # Outputs subject to the check: eligibility-shaped judgments that are
+    # neither acknowledged nor auto-gated. A Money output whose name
+    # happens to carry an eligibility marker (*_gross_income_limit) is a
+    # value, not a gate. Outputs absent from the rule map occur only in
+    # module-less corpus states (the producibility check errors first
+    # otherwise) — nothing to walk there.
+    checked = [
+        output
+        for output in spec.outputs
+        if output not in acknowledged
+        and output in rules_by_name
+        and any(marker in output for marker in ELIGIBILITY_MARKERS)
+        and is_judgment_shaped(rules_by_name[output])
+    ]
+    deps_by_output = {
+        output: _transitive_dependencies(output, rules_by_name) - {output}
+        for output in checked
+    }
 
-    for output in spec.outputs:
-        if output in acknowledged:
-            continue
-        if output in reached_by_siblings:
-            continue
-        if not any(marker in output for marker in ELIGIBILITY_MARKERS):
-            continue
-        rule = rules_by_name.get(output)
-        dtype = rule.get("dtype") if isinstance(rule, Mapping) else None
-        if dtype is not None and dtype != "Judgment":
-            # Coverage polices eligibility *judgments*. A Money output
-            # whose name happens to carry an eligibility marker (e.g.
-            # *_gross_income_limit) is a value, not a gate.
+    for output in checked:
+        # An output that another CHECKED output strictly reaches is a
+        # component the program also happens to expose (e.g.
+        # `ak_atap_resources_eligible` alongside the `ak_atap_eligible`
+        # rollup) — coverage polices the rollups. Only strict, one-way
+        # reach by an output that is itself policed confers the skip:
+        # acknowledged/gated/benefit siblings confer nothing (or
+        # acknowledging one output would silently un-police the rollups
+        # it references), and mutually-referencing outputs stay checked
+        # on both sides.
+        if any(
+            other != output
+            and output in deps_by_output[other]
+            and other not in deps_by_output[output]
+            for other in checked
+        ):
             continue
         uncovered = find_uncovered_eligibility_rules(
             output=output, rules_by_name=rules_by_name
@@ -437,29 +445,41 @@ def _is_module_dir(name: str) -> bool:
     )
 
 
-def _iter_module_files(content_root: Path) -> list[Path]:
+def _is_module_file(path: Path) -> bool:
+    return not (
+        path.name.startswith(".")
+        or path.name.endswith(".test.yaml")
+        or path.name.endswith(".test.yml")
+    )
+
+
+def _iter_module_files(
+    content_root: Path, *, claimed_children: frozenset[str] = frozenset()
+) -> list[Path]:
     """RuleSpec module files under one jurisdiction content root.
 
-    Only descends into module-bearing child directories: dotdirs,
-    underscore dirs, `programs/`, and jurisdiction-patterned dirs
-    (`us-xx/` — those belong to their own prefix) are never ingested,
-    so a monorepo root sweep cannot index another state's law as its
-    own (#19) and prior compose outputs / CI config never become
-    producers.
+    Never descends into dotdirs, underscore dirs, or `programs/` (CI
+    config, manifests, prior compose outputs, compose specs — the engine
+    forbids programs/ import targets). ``claimed_children`` names the
+    monorepo jurisdiction directories owned by their own prefix; only
+    those are skipped, so a legacy repo's content dirs that merely look
+    jurisdiction-shaped (``ui/``, ``id/``) still load (#19 without
+    silent corpus narrowing).
     """
 
-    files: list[Path] = []
+    files = [
+        path
+        for path in sorted(content_root.glob("*.yml"))
+        + sorted(content_root.glob("*.yaml"))
+        if _is_module_file(path)
+    ]
     for child in sorted(content_root.iterdir()):
         if not child.is_dir():
             continue
-        if not _is_module_dir(child.name):
-            continue
-        if _JURISDICTION_DIR_RE.match(child.name):
+        if not _is_module_dir(child.name) or child.name in claimed_children:
             continue
         for path in sorted(child.rglob("*.yml")) + sorted(child.rglob("*.yaml")):
-            if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
-                continue
-            if path.name.startswith("."):
+            if not _is_module_file(path):
                 continue
             relative_parts = path.relative_to(child).parts[:-1]
             if any(not _is_module_dir(part) for part in relative_parts):
@@ -536,9 +556,18 @@ def load_corpus_from_roots(
     for root in roots:
         root = Path(root)
         if not root.is_dir():
-            raise ComposeError(f"{root}: rulespec root does not exist")
-        for prefix, content_root in _jurisdiction_roots(root):
-            for path in _iter_module_files(content_root):
+            raise ComposeError(
+                f"{root}: rulespec root does not exist or is not a directory"
+            )
+        jurisdiction_roots = _jurisdiction_roots(root)
+        claimed = frozenset(
+            content_root.name
+            for _, content_root in jurisdiction_roots
+            if content_root != root
+        )
+        for prefix, content_root in jurisdiction_roots:
+            children = claimed if content_root == root else frozenset()
+            for path in _iter_module_files(content_root, claimed_children=children):
                 target = _target_for_repo_file(prefix, content_root, path)
                 payload = yaml.safe_load(path.read_text()) or {}
                 if not isinstance(payload, Mapping):
@@ -610,11 +639,13 @@ def _root_imports(spec: ProgramSpec, corpus_state: CorpusState) -> tuple[str, ..
         spec.program, corpus_state, explicit=spec.jurisdictions()
     )
     roots: list[str] = []
+    program_prefix = spec.program.split("/", 1)[0]
     for output in spec.outputs:
         producer = _resolve_producer(
             output,
             corpus_state,
             allowed_prefixes=allowed,
+            program_prefix=program_prefix,
             required=True,
         )
         if producer is not None:
@@ -622,11 +653,21 @@ def _root_imports(spec: ProgramSpec, corpus_state: CorpusState) -> tuple[str, ..
     return tuple(roots)
 
 
+def _producer_rank(prefix: str, program_prefix: str) -> tuple[int, int]:
+    if prefix == program_prefix:
+        return (0, 0)
+    if program_prefix.startswith(f"{prefix}-"):
+        # Ancestor of the program's jurisdiction: nearer (longer) wins.
+        return (1, -len(prefix.split("-")))
+    return (2, 0)
+
+
 def _resolve_producer(
     name: str,
     corpus_state: CorpusState,
     *,
     allowed_prefixes: tuple[str, ...],
+    program_prefix: str,
     required: bool,
 ) -> Producer | None:
     if corpus_state.index is None:
@@ -644,15 +685,18 @@ def _resolve_producer(
             raise ComposeError(f"no producer found for {name!r} in scope: {allowed}")
         return None
 
-    # Rank by jurisdiction specificity, not by the spec's list order: a
-    # state producer always outranks the country-level one, so writing
-    # `jurisdictions: [us, us-ny]` in the natural general-first order
-    # cannot silently shadow the state override (#23). Same-specificity
-    # candidates stay a loud ambiguity error.
-    ranked: dict[int, list[Producer]] = defaultdict(list)
+    # Rank within the program's own jurisdiction family, not by the
+    # spec's list order (#23) and not by raw prefix length: the program's
+    # exact prefix wins, then its nearest ancestor (us-ny beats us for a
+    # us-ny program), and producers outside the family never silently
+    # outrank family ones — a uk program with us-ny in scope must not
+    # bind a US state rule over the UK one. Equal-rank candidates stay a
+    # loud ambiguity error.
+    ranked: dict[tuple[int, int], list[Producer]] = defaultdict(list)
     for candidate in candidates:
-        specificity = len(_target_prefix(candidate.target).split("-"))
-        ranked[-specificity].append(candidate)
+        ranked[_producer_rank(_target_prefix(candidate.target), program_prefix)].append(
+            candidate
+        )
     best = tuple(sorted(ranked[min(ranked)], key=lambda item: item.target))
     if len(best) > 1:
         targets = ", ".join(item.target for item in best)
@@ -967,7 +1011,17 @@ def _apply_auto_gate_outputs(
             continue
         processed.add(name)
 
-        from .coverage import find_uncovered_eligibility_rules
+        from .coverage import find_uncovered_eligibility_rules, is_judgment_shaped
+
+        # The wrapper is an all_of conjunction — always a judgment. Gating
+        # a non-judgment output would silently retype it (#26). Checked
+        # before gate discovery so misuse fails deterministically, not
+        # only when the corpus happens to contain uncovered gates.
+        if not is_judgment_shaped(rule):
+            raise ComposeError(
+                f"auto_gate_outputs only applies to judgment outputs; "
+                f"{name!r} has dtype {rule.get('dtype')!r}"
+            )
 
         uncovered = find_uncovered_eligibility_rules(
             output=name, rules_by_name=rules_by_name
@@ -995,14 +1049,6 @@ def _apply_auto_gate_outputs(
             new_rules.append(rule)
             continue
 
-        # The wrapper is an all_of conjunction — always a Judgment. Gating
-        # a non-Judgment output would silently retype it (#26).
-        dtype = rule.get("dtype", "Judgment")
-        if dtype != "Judgment":
-            raise ComposeError(
-                f"auto_gate_outputs only applies to Judgment outputs; "
-                f"{name!r} has dtype {dtype!r}"
-            )
         core_name = f"{name}_core"
         if core_name in rules_by_name:
             raise ComposeError(

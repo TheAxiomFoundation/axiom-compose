@@ -94,7 +94,26 @@ def test_state_producer_outranks_federal_regardless_of_jurisdiction_order():
         assert program.payload["imports"] == ["us-ny:snap/benefit"], order
 
 
-def test_same_specificity_producers_are_ambiguous():
+def test_program_own_prefix_outranks_sibling_state():
+    modules = {
+        "us-ny:snap/benefit": _module(
+            "us-ny:snap/benefit", rules=[_rule("snap_allotment", "100")]
+        ),
+        "us-nj:snap/benefit": _module(
+            "us-nj:snap/benefit", rules=[_rule("snap_allotment", "200")]
+        ),
+    }
+    corpus = with_corpus_index(CorpusState(modules=modules))
+
+    program = compose(
+        _spec("us-ny/snap", ["snap_allotment"], jurisdictions=["us-ny", "us-nj"]),
+        corpus,
+    )
+
+    assert program.payload["imports"] == ["us-ny:snap/benefit"]
+
+
+def test_producers_outside_the_program_family_tie_ambiguously():
     modules = {
         "us-ny:snap/benefit": _module(
             "us-ny:snap/benefit", rules=[_rule("snap_allotment", "100")]
@@ -107,10 +126,27 @@ def test_same_specificity_producers_are_ambiguous():
 
     with pytest.raises(ComposeError, match="ambiguous producers"):
         compose(
-            _spec(
-                "us-ny/snap",
-                ["snap_allotment"],
-                jurisdictions=["us-ny", "us-nj"],
-            ),
+            _spec("us/snap", ["snap_allotment"], jurisdictions=["us-ny", "us-nj"]),
             corpus,
         )
+
+
+def test_foreign_state_never_outranks_the_program_country():
+    # Review regression: ranking by raw hyphen count let us-ny (2 segments)
+    # silently outrank uk (1 segment) for a uk program.
+    modules = {
+        "uk:benefit/child": _module(
+            "uk:benefit/child", rules=[_rule("child_benefit", "100")]
+        ),
+        "us-ny:benefit/child": _module(
+            "us-ny:benefit/child", rules=[_rule("child_benefit", "200")]
+        ),
+    }
+    corpus = with_corpus_index(CorpusState(modules=modules))
+
+    program = compose(
+        _spec("uk/child-benefit", ["child_benefit"], jurisdictions=["uk", "us-ny"]),
+        corpus,
+    )
+
+    assert program.payload["imports"] == ["uk:benefit/child"]

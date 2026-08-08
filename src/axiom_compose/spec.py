@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from pathlib import Path
 from typing import Any, Mapping
 
@@ -43,19 +43,6 @@ class ProgramSpec:
     # list household income/resource gates in every state spec.
     auto_gate_outputs: tuple[str, ...] = field(default_factory=tuple)
 
-    KNOWN_KEYS = frozenset(
-        {
-            "program",
-            "period",
-            "outputs",
-            "scope",
-            "rounding",
-            "transformations",
-            "acknowledged_incomplete",
-            "auto_gate_outputs",
-        }
-    )
-
     @classmethod
     def from_mapping(cls, raw: Mapping[str, Any]) -> "ProgramSpec":
         required = ("program", "period", "outputs")
@@ -63,8 +50,10 @@ class ProgramSpec:
         if missing:
             raise SpecError(f"missing required spec keys: {', '.join(missing)}")
         # A misspelled key (`auto_gate_output:`) must not silently disable
-        # the feature it meant to enable (#25).
-        unknown = sorted(str(key) for key in raw if key not in cls.KNOWN_KEYS)
+        # the feature it meant to enable (#25). Known keys derive from the
+        # dataclass fields so the check cannot drift from the schema.
+        known = {field.name for field in fields(cls)}
+        unknown = sorted(str(key) for key in raw if key not in known)
         if unknown:
             raise SpecError(f"unknown spec keys: {', '.join(unknown)}")
 
