@@ -564,11 +564,15 @@ def _resolve_producer(
             raise ComposeError(f"no producer found for {name!r} in scope: {allowed}")
         return None
 
+    # Rank by jurisdiction specificity, not by the spec's list order: a
+    # state producer always outranks the country-level one, so writing
+    # `jurisdictions: [us, us-ny]` in the natural general-first order
+    # cannot silently shadow the state override (#23). Same-specificity
+    # candidates stay a loud ambiguity error.
     ranked: dict[int, list[Producer]] = defaultdict(list)
     for candidate in candidates:
-        ranked[allowed_prefixes.index(_target_prefix(candidate.target))].append(
-            candidate
-        )
+        specificity = len(_target_prefix(candidate.target).split("-"))
+        ranked[-specificity].append(candidate)
     best = tuple(sorted(ranked[min(ranked)], key=lambda item: item.target))
     if len(best) > 1:
         targets = ", ".join(item.target for item in best)
@@ -602,18 +606,29 @@ def _resolve_producer_in_context(
     return candidates[0]
 
 
+def _country_root(prefix: str) -> str:
+    """Country-level prefix for a jurisdiction (`us-ny` -> `us`, `uk` -> `uk`)."""
+
+    return prefix.split("-", 1)[0]
+
+
 def _allowed_prefixes_for_program(
     program: str, corpus_state: CorpusState, *, explicit: tuple[str, ...]
 ) -> tuple[str, ...]:
+    # The country-level fallback is derived from the program's own
+    # jurisdiction — never a hardcoded `us` (#21: a uk/ program with a
+    # missing producer must error, not silently bind to a same-named
+    # US rule).
+    program_prefix = program.split("/", 1)[0] if program else ""
+    country = _country_root(program_prefix) if program_prefix else ""
     if explicit:
-        return _dedupe((*explicit, "us"))
+        return _dedupe((*explicit, *((country,) if country else ())))
     if not program:
         prefixes = tuple(
             _target_prefix(target) for target in sorted(corpus_state.modules)
         )
-        return _dedupe(("us", *prefixes))
-    program_prefix = program.split("/", 1)[0]
-    return _dedupe((program_prefix, "us"))
+        return _dedupe(prefixes)
+    return _dedupe((program_prefix, country))
 
 
 def _assert_scope_roots_in_corpus(
@@ -643,7 +658,10 @@ def _scope_target(program: str, scope_name: str, path: str) -> str:
 def _scope_prefix(program: str, scope_name: str) -> str:
     normalized = scope_name.strip()
     if normalized == "federal":
-        return "us"
+        # Country-level scope resolves per program family, not to a
+        # hardcoded `us` (#21): `uk-sct/...` programs' federal scope is
+        # `uk`, US state programs' is `us`.
+        return _country_root(program.split("/", 1)[0])
     if normalized == "state":
         return program.split("/", 1)[0]
     return normalized
