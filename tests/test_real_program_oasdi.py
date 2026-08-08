@@ -64,27 +64,45 @@ def _run_axiom_oasdi_case(tmp_path: Path) -> float:
     program_path = tmp_path / "oasdi-wage-tax.yaml"
     artifact_path = tmp_path / "oasdi-wage-tax.compiled.json"
     program_path.write_bytes(program.source)
-    env = {
-        **os.environ,
-        "AXIOM_RULESPEC_REPO_ROOTS": str(rulespec_us.parent),
-    }
+    env = dict(os.environ)
 
-    subprocess.run(
+    # Engine main's canonical hard cut (axiom-rules-engine#103): composed
+    # output compiles only via compile-composed, roots only via explicit
+    # --rulespec-root flags (the env-var fallback was removed).
+    completed = subprocess.run(
         [
             "cargo",
             "run",
             "--quiet",
             "--",
-            "compile",
+            "compile-composed",
             "--program",
             str(program_path),
+            "--rulespec-root",
+            str(rulespec_us),
             "--output",
             str(artifact_path),
         ],
         cwd=engine_root,
         env=env,
-        check=True,
+        check=False,
+        capture_output=True,
+        text=True,
     )
+    if completed.returncode and "non-canonical path component" in completed.stderr:
+        pytest.xfail(
+            "rulespec-us checkout fails engine main's canonical-path root "
+            "scan (rulespec-us#1049: colon/space/en-dash filenames)"
+        )
+    if completed.returncode and "root-level `programs/`" in completed.stderr:
+        pytest.xfail(
+            "rulespec-us checkout keeps programs/ at the root, which engine "
+            "main forbids (layout migration, axiom-compose#28)"
+        )
+    if completed.returncode:
+        raise AssertionError(
+            f"compile-composed failed:\n{completed.stderr[-2000:]}"
+        )
     completed = subprocess.run(
         [
             "cargo",
