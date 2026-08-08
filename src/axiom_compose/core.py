@@ -106,18 +106,34 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     imports = dependency_closure(
         root_imports, corpus_state, allowed_prefixes=allowed_prefixes
     )
+    _assert_imports_resolve(imports, corpus_state)
     rules = [
         build_transformation(item.pattern, {"pattern": item.pattern, **item.parameters})
         for item in spec.transformations
     ]
     rules = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
 
+    # Every declared output must resolve to an actual rule in the
+    # composition — a typo'd output must not compose to a module that
+    # silently lacks it (#22). Module-less corpus states (pattern-synthesis
+    # fixtures) are exempt: imported modules' rules cannot be inspected.
+    rules_by_name = _rules_in_scope(imports, corpus_state, rules)
+    if corpus_state.modules:
+        missing_outputs = sorted(
+            output for output in spec.outputs if output not in rules_by_name
+        )
+        if missing_outputs:
+            raise ComposeError(
+                "declared outputs are not produced by the composed module: "
+                + ", ".join(missing_outputs)
+            )
+
     # Coverage assertion: walk each eligibility-shaped output and refuse to
     # compose if there are atomic eligibility rules in scope the output
     # silently ignores. Closes the "compose succeeds but engine returns
     # over-permissive answer" trap that bit CA SNAP. Specs can opt out per
     # output via `acknowledged_incomplete:` for honest bootstrap states.
-    _assert_eligibility_coverage(spec, corpus_state, imports, rules)
+    _assert_eligibility_coverage(spec, rules_by_name)
 
     payload: dict[str, Any] = {
         "format": "rulespec/v1",
@@ -136,23 +152,16 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     return RunnableProgram(target=target, payload=payload, source=source)
 
 
-def _assert_eligibility_coverage(
-    spec: ProgramSpec,
-    corpus_state: CorpusState,
+def _rules_in_scope(
     imports: tuple[str, ...],
+    corpus_state: CorpusState,
     synthesized_rules: list[Mapping[str, Any]],
-) -> None:
-    """Raise ComposeError if any eligibility-shaped output silently drops
-    atomic eligibility rules that the imported corpus exposes."""
-    from .coverage import (
-        ELIGIBILITY_MARKERS,
-        find_uncovered_eligibility_rules,
-        format_coverage_error,
-    )
+) -> dict[str, Mapping[str, Any]]:
+    """Unified rule map: atomic rules from imported modules plus synthesized
+    transformation rules. Both sides expose `versions`-with-formulas the
+    coverage analyzer understands. Synthesized rules win over corpus rules
+    of the same name — they're the program-level override."""
 
-    # Build the unified rule map: atomic rules from imported modules plus
-    # synthesized transformation rules. Both sides expose `versions`-with-
-    # formulas the analyzer understands.
     rules_by_name: dict[str, Mapping[str, Any]] = {}
     for target in imports:
         module = corpus_state.modules.get(target)
@@ -165,11 +174,43 @@ def _assert_eligibility_coverage(
             if isinstance(name, str) and name and name not in rules_by_name:
                 rules_by_name[name] = rule
     for rule in synthesized_rules:
-        name = rule.get("name")
+        name = rule.get("name") if isinstance(rule, Mapping) else None
         if isinstance(name, str) and name:
-            # Synthesized rules win over corpus rules of the same name —
-            # they're the program-level override.
             rules_by_name[name] = rule
+    return rules_by_name
+
+
+def _assert_imports_resolve(
+    imports: tuple[str, ...], corpus_state: CorpusState
+) -> None:
+    # An emitted import that names no module in the loaded corpus would
+    # surface as an engine load error three repos downstream instead of a
+    # compose error (#22 — observed live when uk/universal-credit composed
+    # against rulespec-uk alone emitted a rulespec-uk-official target).
+    # Module-less corpus states (pattern-synthesis fixtures) are exempt.
+    if not corpus_state.modules:
+        return
+    unresolved = sorted(
+        target for target in imports if target not in corpus_state.modules
+    )
+    if unresolved:
+        raise ComposeError(
+            "composed imports do not resolve to any module in the corpus: "
+            + ", ".join(unresolved)
+        )
+
+
+def _assert_eligibility_coverage(
+    spec: ProgramSpec,
+    rules_by_name: Mapping[str, Mapping[str, Any]],
+) -> None:
+    """Raise ComposeError if any eligibility-shaped output silently drops
+    atomic eligibility rules that the imported corpus exposes."""
+    from .coverage import (
+        ELIGIBILITY_MARKERS,
+        find_uncovered_eligibility_rules,
+        format_coverage_error,
+    )
 
     # Auto-gated outputs opt out of strict coverage: the auto-gate already
     # wired in the household-level eligibility gates; any remaining uncovered
@@ -181,10 +222,6 @@ def _assert_eligibility_coverage(
         if output in acknowledged:
             continue
         if not any(marker in output for marker in ELIGIBILITY_MARKERS):
-            continue
-        if output not in rules_by_name:
-            # The outputs-against-registry check upstream will already
-            # have errored on undefined outputs; skip silently here.
             continue
         uncovered = find_uncovered_eligibility_rules(
             output=output, rules_by_name=rules_by_name
