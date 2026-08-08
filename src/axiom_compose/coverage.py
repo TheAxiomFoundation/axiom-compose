@@ -50,20 +50,25 @@ _IDENT_RE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
 
 # Identifiers that look like rule references but actually aren't — generic
 # language keywords plus engine relation/aggregation primitives. Anything
-# in this set is dropped when extracting formula dependencies.
-_FORMULA_KEYWORDS = frozenset(
+# in this set is dropped when extracting formula dependencies. This is the
+# single canonical list: core's dependency inference imports it too, so the
+# two analyzers cannot drift apart again (#26).
+FORMULA_KEYWORDS = frozenset(
     {
         "and",
         "or",
         "not",
         "if",
         "else",
+        "match",
         "true",
         "false",
         "null",
         "in",
         "min",
         "max",
+        "ceil",
+        "floor",
         "len",
         "sum",
         "count",
@@ -74,6 +79,26 @@ _FORMULA_KEYWORDS = frozenset(
         "member_of_household",  # relation, not a rule
     }
 )
+
+# Dtypes the engine treats as boolean judgments (serde aliases included).
+# A rule with no dtype is assumed judgment-shaped — coverage would rather
+# over-police than silently exempt a gate.
+_JUDGMENT_DTYPES = frozenset({"judgment", "bool", "boolean"})
+
+
+def is_judgment_shaped(rule: Any) -> bool:
+    """Whether a rule is (or may be) a boolean judgment.
+
+    The single authority for the eligibility-gate dtype test — used by the
+    coverage candidate filter, the compose-side output filter, and the
+    auto-gate dtype refusal, so the three cannot drift apart (#26)."""
+
+    if not isinstance(rule, Mapping):
+        return True
+    dtype = rule.get("dtype")
+    if dtype is None:
+        return True
+    return str(dtype).strip().lower() in _JUDGMENT_DTYPES
 
 
 def find_uncovered_eligibility_rules(
@@ -90,9 +115,16 @@ def find_uncovered_eligibility_rules(
     analyzer treats them uniformly.
     """
     reachable = _transitive_dependencies(output, rules_by_name)
-    eligibility = {
-        name for name in rules_by_name if any(marker in name for marker in markers)
-    }
+    eligibility = set()
+    for name, rule in rules_by_name.items():
+        if not any(marker in name for marker in markers):
+            continue
+        if not is_judgment_shaped(rule):
+            # A Money/Count value whose name carries an eligibility marker
+            # (`*_income_limit`, `*_resource_limit`) is a parameter a gate
+            # consults, not a gate the output must AND in.
+            continue
+        eligibility.add(name)
     return sorted(eligibility - reachable - {output})
 
 
@@ -126,7 +158,7 @@ def _identifiers_in_rule(rule: Mapping[str, Any]) -> Iterable[str]:
             formula = version.get("formula")
             if isinstance(formula, str):
                 for identifier in _IDENT_RE.findall(formula):
-                    if identifier in _FORMULA_KEYWORDS:
+                    if identifier in FORMULA_KEYWORDS:
                         continue
                     yield identifier
     # Derived-relation rules carry their predicate next to the rule body

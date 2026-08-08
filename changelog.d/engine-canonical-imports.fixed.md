@@ -1,0 +1,1 @@
+Composed output emits module-only imports — fragment-qualified targets are normalized to their module and deduped — so engine main's `compile-composed` accepts compose main's output again (#29). Verified against axiom-rules-engine main (0.2.1): composed program compiles to an artifact; the fragment-qualified form reproduces the original rejection.

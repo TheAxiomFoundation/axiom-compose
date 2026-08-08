@@ -88,14 +88,20 @@ def test_real_ca_snap_composition_compiles_through_engine(tmp_path):
 
 def _compose_ca_snap():
     rulespec_us = _external_path("AXIOM_RULESPEC_US_ROOT")
-    rulespec_us_ca = _external_path("AXIOM_RULESPEC_US_CA_ROOT")
     programs_root = _external_path("AXIOM_PROGRAMS_ROOT")
 
+    # The country monorepo carries us-ca/; the standalone rulespec-us-ca
+    # repo is archived. Loading both would duplicate every CA module,
+    # which the loader now rejects (#24) — fall back to the legacy pair
+    # only when the monorepo has no CA content.
+    roots = [rulespec_us]
+    corpus_sha = "rulespec-us@acceptance"
+    if not (rulespec_us / "us-ca").is_dir():
+        roots.append(_external_path("AXIOM_RULESPEC_US_CA_ROOT"))
+        corpus_sha = "rulespec-us+rulespec-us-ca@acceptance"
+
     spec = load_spec(programs_root / "us-ca" / "snap" / "fy-2026.yaml")
-    corpus = load_corpus_from_roots(
-        [rulespec_us, rulespec_us_ca],
-        corpus_sha="rulespec-us+rulespec-us-ca@acceptance",
-    )
+    corpus = load_corpus_from_roots(roots, corpus_sha=corpus_sha)
     return compose(spec, corpus)
 
 

@@ -163,3 +163,35 @@ def test_derived_relation_rejects_missing_source_relation():
 def test_unknown_pattern_fails_loudly():
     with pytest.raises(TransformationError, match="unknown transformation"):
         build_transformation("program_specific", {})
+
+
+def test_conditional_value_rejects_boolean_when_false():
+    with pytest.raises(TransformationError, match="when_false"):
+        build_transformation(
+            "conditional_value",
+            {
+                "name": "amount",
+                "condition": "is_eligible",
+                "when_true": "base_amount",
+                "when_false": True,
+                "effective_from": "2026-01-01",
+            },
+        )
+
+
+def test_all_of_and_any_of_reject_empty_conditions():
+    for pattern in ("all_of", "any_of"):
+        with pytest.raises(TransformationError, match="at least one condition"):
+            build_transformation(
+                pattern,
+                {"name": "gate", "conditions": [], "effective_from": "2026-01-01"},
+            )
+
+
+def test_identifier_grammar_rejects_mixed_case_and_unicode():
+    for bad in ("aBc", "éligible", "_leading", "9start"):
+        with pytest.raises(TransformationError):
+            build_transformation(
+                "sum_terms",
+                {"name": bad, "terms": ["a"], "effective_from": "2026-01-01"},
+            )

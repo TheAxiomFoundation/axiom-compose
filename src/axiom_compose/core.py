@@ -10,6 +10,7 @@ from typing import Any, Mapping, Protocol
 
 import yaml
 
+from .coverage import FORMULA_KEYWORDS
 from .spec import ProgramSpec
 from .transformations import build_transformation
 
@@ -25,23 +26,8 @@ class ConceptRegistryLike(Protocol):
 
 
 IDENT_RE = re.compile(r"\b([a-z][a-z0-9_]*)\b")
-BUILTIN_IDENTIFIERS = frozenset(
-    {
-        "and",
-        "ceil",
-        "count_where",
-        "else",
-        "false",
-        "floor",
-        "if",
-        "match",
-        "max",
-        "min",
-        "not",
-        "or",
-        "true",
-    }
-)
+# One canonical keyword list shared with the coverage analyzer (#26).
+BUILTIN_IDENTIFIERS = FORMULA_KEYWORDS
 
 
 @dataclass(frozen=True)
@@ -99,25 +85,36 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     """
 
     _validate_outputs_against_registry(spec, corpus_state.concept_registry)
-    allowed_prefixes = _allowed_prefixes_for_program(
-        spec.program, corpus_state, explicit=spec.jurisdictions()
-    )
     root_imports = _root_imports(spec, corpus_state)
-    imports = dependency_closure(
-        root_imports, corpus_state, allowed_prefixes=allowed_prefixes
-    )
+    imports = dependency_closure(root_imports, corpus_state)
+    _assert_imports_resolve(imports, corpus_state)
     rules = [
         build_transformation(item.pattern, {"pattern": item.pattern, **item.parameters})
         for item in spec.transformations
     ]
-    rules = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
+    rules, gated_outputs = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
+
+    # Every declared output must resolve to an actual rule in the
+    # composition — a typo'd output must not compose to a module that
+    # silently lacks it (#22). Module-less corpus states (pattern-synthesis
+    # fixtures) are exempt: imported modules' rules cannot be inspected.
+    rules_by_name = _rules_in_scope(imports, corpus_state, rules)
+    if corpus_state.modules:
+        missing_outputs = sorted(
+            output for output in spec.outputs if output not in rules_by_name
+        )
+        if missing_outputs:
+            raise ComposeError(
+                "declared outputs are not produced by the composed module: "
+                + ", ".join(missing_outputs)
+            )
 
     # Coverage assertion: walk each eligibility-shaped output and refuse to
     # compose if there are atomic eligibility rules in scope the output
     # silently ignores. Closes the "compose succeeds but engine returns
     # over-permissive answer" trap that bit CA SNAP. Specs can opt out per
     # output via `acknowledged_incomplete:` for honest bootstrap states.
-    _assert_eligibility_coverage(spec, corpus_state, imports, rules)
+    _assert_eligibility_coverage(spec, rules_by_name, gated_outputs)
 
     payload: dict[str, Any] = {
         "format": "rulespec/v1",
@@ -136,24 +133,18 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
     return RunnableProgram(target=target, payload=payload, source=source)
 
 
-def _assert_eligibility_coverage(
-    spec: ProgramSpec,
-    corpus_state: CorpusState,
+def _rules_in_scope(
     imports: tuple[str, ...],
+    corpus_state: CorpusState,
     synthesized_rules: list[Mapping[str, Any]],
-) -> None:
-    """Raise ComposeError if any eligibility-shaped output silently drops
-    atomic eligibility rules that the imported corpus exposes."""
-    from .coverage import (
-        ELIGIBILITY_MARKERS,
-        find_uncovered_eligibility_rules,
-        format_coverage_error,
-    )
+) -> dict[str, Mapping[str, Any]]:
+    """Unified rule map: atomic rules from imported modules plus synthesized
+    transformation rules. Both sides expose `versions`-with-formulas the
+    coverage analyzer understands. Synthesized rules win over corpus rules
+    of the same name — they're the program-level override."""
 
-    # Build the unified rule map: atomic rules from imported modules plus
-    # synthesized transformation rules. Both sides expose `versions`-with-
-    # formulas the analyzer understands.
     rules_by_name: dict[str, Mapping[str, Any]] = {}
+    defined_in: dict[str, str] = {}
     for target in imports:
         module = corpus_state.modules.get(target)
         if module is None:
@@ -162,29 +153,116 @@ def _assert_eligibility_coverage(
             if not isinstance(rule, Mapping):
                 continue
             name = rule.get("name")
-            if isinstance(name, str) and name and name not in rules_by_name:
-                rules_by_name[name] = rule
+            if not isinstance(name, str) or not name:
+                continue
+            previous = defined_in.get(name)
+            if previous is not None and previous != target:
+                # Two imported modules defining the same rule name would
+                # otherwise resolve first-import-wins with no error, unlike
+                # discovery which raises on ambiguity (#26). Data relations
+                # are exempt: they declare runtime-supplied membership
+                # (structurally identical everywhere), and the corpus
+                # declares e.g. member_of_household in every module that
+                # scopes to it.
+                both_data_relations = (
+                    rule.get("kind") == "data_relation"
+                    and rules_by_name[name].get("kind") == "data_relation"
+                )
+                if not both_data_relations:
+                    raise ComposeError(
+                        f"rule {name!r} is defined by two imported modules: "
+                        f"{previous} and {target}"
+                    )
+            rules_by_name[name] = rule
+            defined_in[name] = target
     for rule in synthesized_rules:
-        name = rule.get("name")
+        name = rule.get("name") if isinstance(rule, Mapping) else None
         if isinstance(name, str) and name:
             # Synthesized rules win over corpus rules of the same name —
             # they're the program-level override.
             rules_by_name[name] = rule
+    return rules_by_name
 
-    # Auto-gated outputs opt out of strict coverage: the auto-gate already
-    # wired in the household-level eligibility gates; any remaining uncovered
-    # rules are conditional alternatives or exception clauses the auto-gate
-    # deliberately excludes (because AND-gating them would require inputs
-    # the program doesn't expose).
-    acknowledged = set(spec.acknowledged_incomplete) | set(spec.auto_gate_outputs)
-    for output in spec.outputs:
-        if output in acknowledged:
-            continue
-        if not any(marker in output for marker in ELIGIBILITY_MARKERS):
-            continue
-        if output not in rules_by_name:
-            # The outputs-against-registry check upstream will already
-            # have errored on undefined outputs; skip silently here.
+
+def _assert_imports_resolve(
+    imports: tuple[str, ...], corpus_state: CorpusState
+) -> None:
+    # An emitted import that names no module in the loaded corpus would
+    # surface as an engine load error three repos downstream instead of a
+    # compose error (#22 — observed live when uk/universal-credit composed
+    # against rulespec-uk alone emitted a rulespec-uk-official target).
+    # Module-less corpus states (pattern-synthesis fixtures) are exempt.
+    if not corpus_state.modules:
+        return
+    unresolved = sorted(
+        target for target in imports if target not in corpus_state.modules
+    )
+    if unresolved:
+        raise ComposeError(
+            "composed imports do not resolve to any module in the corpus: "
+            + ", ".join(unresolved)
+        )
+
+
+def _assert_eligibility_coverage(
+    spec: ProgramSpec,
+    rules_by_name: Mapping[str, Mapping[str, Any]],
+    gated_outputs: frozenset[str],
+) -> None:
+    """Raise ComposeError if any eligibility-shaped output silently drops
+    atomic eligibility rules that the imported corpus exposes."""
+    # Outputs the auto-gate actually processed opt out of strict coverage:
+    # the gate already wired in the household-level eligibility gates; any
+    # remaining uncovered rules are conditional alternatives or exception
+    # clauses the gate deliberately excludes (because AND-gating them would
+    # require inputs the program doesn't expose). auto_gate_outputs the
+    # gate could NOT process (corpus-produced rules) get no exemption —
+    # that combination was previously a silent no-op that reopened the
+    # over-permissive trap (#20).
+    from .coverage import (
+        ELIGIBILITY_MARKERS,
+        _transitive_dependencies,
+        find_uncovered_eligibility_rules,
+        format_coverage_error,
+        is_judgment_shaped,
+    )
+
+    acknowledged = set(spec.acknowledged_incomplete) | set(gated_outputs)
+    # Outputs subject to the check: eligibility-shaped judgments that are
+    # neither acknowledged nor auto-gated. A Money output whose name
+    # happens to carry an eligibility marker (*_gross_income_limit) is a
+    # value, not a gate. Outputs absent from the rule map occur only in
+    # module-less corpus states (the producibility check errors first
+    # otherwise) — nothing to walk there.
+    checked = [
+        output
+        for output in spec.outputs
+        if output not in acknowledged
+        and output in rules_by_name
+        and any(marker in output for marker in ELIGIBILITY_MARKERS)
+        and is_judgment_shaped(rules_by_name[output])
+    ]
+    deps_by_output = {
+        output: _transitive_dependencies(output, rules_by_name) - {output}
+        for output in checked
+    }
+
+    for output in checked:
+        # An output that another CHECKED output strictly reaches is a
+        # component the program also happens to expose (e.g.
+        # `ak_atap_resources_eligible` alongside the `ak_atap_eligible`
+        # rollup) — coverage polices the rollups. Only strict, one-way
+        # reach by an output that is itself policed confers the skip:
+        # acknowledged/gated/benefit siblings confer nothing (or
+        # acknowledging one output would silently un-police the rollups
+        # it references), and mutually-referencing outputs stay checked
+        # on both sides.
+        if any(
+            other != output
+            and output in deps_by_output[other]
+            and other not in deps_by_output[output]
+            for other in checked
+        ):
             continue
         uncovered = find_uncovered_eligibility_rules(
             output=output, rules_by_name=rules_by_name
@@ -196,10 +274,12 @@ def _assert_eligibility_coverage(
 def dependency_closure(
     roots: tuple[str, ...] | list[str],
     corpus_state: CorpusState,
-    *,
-    allowed_prefixes: tuple[str, ...] | None = None,
 ) -> tuple[str, ...]:
-    """Return deterministic import and formula-dependency closure."""
+    """Return deterministic import and formula-dependency closure.
+
+    Jurisdiction filtering happens at root selection (producer discovery);
+    the closure itself follows explicit imports and import-bounded formula
+    dependencies only — it deliberately has no prefix filter (#26)."""
 
     seen: set[str] = set()
     ordered: list[str] = []
@@ -352,6 +432,61 @@ def load_corpus_state(
 _JURISDICTION_DIR_RE = re.compile(r"^[a-z]{2}(-[a-z0-9-]+)*$")
 _CONTENT_MARKER_DIRS = ("statutes", "regulations", "policies", "legislation", "sources")
 
+# Directories that never contain atomic RuleSpec modules. `programs/` holds
+# compose specs (the engine forbids programs/ import targets); dot- and
+# underscore-prefixed directories hold CI config, manifests, and prior
+# compose outputs (`.github/`, `.axiom/`, `_compose/`).
+_NON_MODULE_DIRS = frozenset({"programs"})
+
+
+def _is_module_dir(name: str) -> bool:
+    return not (
+        name.startswith(".") or name.startswith("_") or name in _NON_MODULE_DIRS
+    )
+
+
+def _is_module_file(path: Path) -> bool:
+    return not (
+        path.name.startswith(".")
+        or path.name.endswith(".test.yaml")
+        or path.name.endswith(".test.yml")
+    )
+
+
+def _iter_module_files(
+    content_root: Path, *, claimed_children: frozenset[str] = frozenset()
+) -> list[Path]:
+    """RuleSpec module files under one jurisdiction content root.
+
+    Never descends into dotdirs, underscore dirs, or `programs/` (CI
+    config, manifests, prior compose outputs, compose specs — the engine
+    forbids programs/ import targets). ``claimed_children`` names the
+    monorepo jurisdiction directories owned by their own prefix; only
+    those are skipped, so a legacy repo's content dirs that merely look
+    jurisdiction-shaped (``ui/``, ``id/``) still load (#19 without
+    silent corpus narrowing).
+    """
+
+    files = [
+        path
+        for path in sorted(content_root.glob("*.yml"))
+        + sorted(content_root.glob("*.yaml"))
+        if _is_module_file(path)
+    ]
+    for child in sorted(content_root.iterdir()):
+        if not child.is_dir():
+            continue
+        if not _is_module_dir(child.name) or child.name in claimed_children:
+            continue
+        for path in sorted(child.rglob("*.yml")) + sorted(child.rglob("*.yaml")):
+            if not _is_module_file(path):
+                continue
+            relative_parts = path.relative_to(child).parts[:-1]
+            if any(not _is_module_dir(part) for part in relative_parts):
+                continue
+            files.append(path)
+    return files
+
 
 def _jurisdiction_roots(root: Path) -> list[tuple[str, Path]]:
     """(prefix, content root) pairs for one checkout.
@@ -417,19 +552,42 @@ def load_corpus_from_roots(
     """
 
     modules: dict[str, RuleSpecModule] = {}
+    loaded_from: dict[str, Path] = {}
     for root in roots:
         root = Path(root)
-        for prefix, content_root in _jurisdiction_roots(root):
-            for path in sorted(content_root.rglob("*.yml")) + sorted(
-                content_root.rglob("*.yaml")
-            ):
-                if path.name.endswith(".test.yaml") or path.name.endswith(".test.yml"):
-                    continue
+        if not root.is_dir():
+            raise ComposeError(
+                f"{root}: rulespec root does not exist or is not a directory"
+            )
+        jurisdiction_roots = _jurisdiction_roots(root)
+        claimed = frozenset(
+            content_root.name
+            for _, content_root in jurisdiction_roots
+            if content_root != root
+        )
+        for prefix, content_root in jurisdiction_roots:
+            children = claimed if content_root == root else frozenset()
+            for path in _iter_module_files(content_root, claimed_children=children):
                 target = _target_for_repo_file(prefix, content_root, path)
                 payload = yaml.safe_load(path.read_text()) or {}
                 if not isinstance(payload, Mapping):
                     raise ComposeError(f"{path}: module root must be a mapping")
+                previous = loaded_from.get(target)
+                if previous is not None and previous != path:
+                    # Identical content under the same target is tolerated:
+                    # during the monorepo transition a country checkout and
+                    # its archived legacy sibling legitimately carry the
+                    # same modules. Diverging content stays a hard error
+                    # (#24 — .yml vs .yaml shadowing, stale duplicate
+                    # checkouts).
+                    if modules[target].payload != payload:
+                        raise ComposeError(
+                            f"module target {target!r} loaded from two files "
+                            f"with different content: {previous} and {path}"
+                        )
+                    continue
                 modules[target] = module_from_payload(target, payload)
+                loaded_from[target] = path
     return with_corpus_index(
         CorpusState(
             modules=modules,
@@ -481,11 +639,13 @@ def _root_imports(spec: ProgramSpec, corpus_state: CorpusState) -> tuple[str, ..
         spec.program, corpus_state, explicit=spec.jurisdictions()
     )
     roots: list[str] = []
+    program_prefix = spec.program.split("/", 1)[0]
     for output in spec.outputs:
         producer = _resolve_producer(
             output,
             corpus_state,
             allowed_prefixes=allowed,
+            program_prefix=program_prefix,
             required=True,
         )
         if producer is not None:
@@ -493,11 +653,21 @@ def _root_imports(spec: ProgramSpec, corpus_state: CorpusState) -> tuple[str, ..
     return tuple(roots)
 
 
+def _producer_rank(prefix: str, program_prefix: str) -> tuple[int, int]:
+    if prefix == program_prefix:
+        return (0, 0)
+    if program_prefix.startswith(f"{prefix}-"):
+        # Ancestor of the program's jurisdiction: nearer (longer) wins.
+        return (1, -len(prefix.split("-")))
+    return (2, 0)
+
+
 def _resolve_producer(
     name: str,
     corpus_state: CorpusState,
     *,
     allowed_prefixes: tuple[str, ...],
+    program_prefix: str,
     required: bool,
 ) -> Producer | None:
     if corpus_state.index is None:
@@ -515,9 +685,16 @@ def _resolve_producer(
             raise ComposeError(f"no producer found for {name!r} in scope: {allowed}")
         return None
 
-    ranked: dict[int, list[Producer]] = defaultdict(list)
+    # Rank within the program's own jurisdiction family, not by the
+    # spec's list order (#23) and not by raw prefix length: the program's
+    # exact prefix wins, then its nearest ancestor (us-ny beats us for a
+    # us-ny program), and producers outside the family never silently
+    # outrank family ones — a uk program with us-ny in scope must not
+    # bind a US state rule over the UK one. Equal-rank candidates stay a
+    # loud ambiguity error.
+    ranked: dict[tuple[int, int], list[Producer]] = defaultdict(list)
     for candidate in candidates:
-        ranked[allowed_prefixes.index(_target_prefix(candidate.target))].append(
+        ranked[_producer_rank(_target_prefix(candidate.target), program_prefix)].append(
             candidate
         )
     best = tuple(sorted(ranked[min(ranked)], key=lambda item: item.target))
@@ -553,18 +730,29 @@ def _resolve_producer_in_context(
     return candidates[0]
 
 
+def _country_root(prefix: str) -> str:
+    """Country-level prefix for a jurisdiction (`us-ny` -> `us`, `uk` -> `uk`)."""
+
+    return prefix.split("-", 1)[0]
+
+
 def _allowed_prefixes_for_program(
     program: str, corpus_state: CorpusState, *, explicit: tuple[str, ...]
 ) -> tuple[str, ...]:
+    # The country-level fallback is derived from the program's own
+    # jurisdiction — never a hardcoded `us` (#21: a uk/ program with a
+    # missing producer must error, not silently bind to a same-named
+    # US rule).
+    program_prefix = program.split("/", 1)[0] if program else ""
+    country = _country_root(program_prefix) if program_prefix else ""
     if explicit:
-        return _dedupe((*explicit, "us"))
+        return _dedupe((*explicit, *((country,) if country else ())))
     if not program:
         prefixes = tuple(
             _target_prefix(target) for target in sorted(corpus_state.modules)
         )
-        return _dedupe(("us", *prefixes))
-    program_prefix = program.split("/", 1)[0]
-    return _dedupe((program_prefix, "us"))
+        return _dedupe(prefixes)
+    return _dedupe((program_prefix, country))
 
 
 def _assert_scope_roots_in_corpus(
@@ -594,7 +782,10 @@ def _scope_target(program: str, scope_name: str, path: str) -> str:
 def _scope_prefix(program: str, scope_name: str) -> str:
     normalized = scope_name.strip()
     if normalized == "federal":
-        return "us"
+        # Country-level scope resolves per program family, not to a
+        # hardcoded `us` (#21): `uk-sct/...` programs' federal scope is
+        # `uk`, US state programs' is `us`.
+        return _country_root(program.split("/", 1)[0])
     if normalized == "state":
         return program.split("/", 1)[0]
     return normalized
@@ -603,6 +794,14 @@ def _scope_prefix(program: str, scope_name: str) -> str:
 def _normalize_import(target: str) -> str:
     prefix, separator, path = target.strip().partition(":")
     if not separator or not prefix or not path:
+        raise ComposeError(f"invalid RuleSpec import target: {target!r}")
+    # Imports are module-level: a `#fragment` names a rule inside the
+    # module, but the engine's compile-composed only accepts canonical
+    # atomic module targets (#29). Stripping here keeps the closure walk
+    # resolving fragment-qualified imports to their module and dedupes
+    # them in the emitted output.
+    path = path.split("#", 1)[0]
+    if not path.strip().strip("/"):
         raise ComposeError(f"invalid RuleSpec import target: {target!r}")
     return f"{prefix}:{path.strip().strip('/')}"
 
@@ -780,7 +979,7 @@ def _apply_auto_gate_outputs(
     corpus_state: CorpusState,
     imports: tuple[str, ...],
     rules: list[Mapping[str, Any]],
-) -> list[Mapping[str, Any]]:
+) -> tuple[list[Mapping[str, Any]], frozenset[str]]:
     """For each output in ``spec.auto_gate_outputs``, AND-gate the existing
     rule with eligibility-shaped rules from scope that the output doesn't
     reach. Rename the original rule to ``<name>_core`` and synthesize a new
@@ -790,34 +989,39 @@ def _apply_auto_gate_outputs(
     the existing rule plus all imported corpus rules — only eligibility-
     shaped rules that the original output does not already reach get
     AND-gated in. Programs without ``auto_gate_outputs`` are unchanged.
+
+    Returns the (possibly rewritten) rules plus the set of outputs the
+    gate actually processed. The gate mechanism rewrites the output rule,
+    and compose cannot rewrite rules inside imported corpus modules — so a
+    corpus-produced output is never processed here and gets NO exemption
+    from the coverage assertion; the corpus module must cover its own
+    gates or composition fails there (#20).
     """
     if not spec.auto_gate_outputs:
-        return rules
+        return rules, frozenset()
 
-    rules_by_name: dict[str, Mapping[str, Any]] = {}
-    for target in imports:
-        module = corpus_state.modules.get(target)
-        if module is None:
-            continue
-        for rule in module.payload.get("rules") or ():
-            if not isinstance(rule, Mapping):
-                continue
-            name = rule.get("name")
-            if isinstance(name, str) and name and name not in rules_by_name:
-                rules_by_name[name] = rule
-    for rule in rules:
-        name = rule.get("name") if isinstance(rule, Mapping) else None
-        if isinstance(name, str) and name:
-            rules_by_name[name] = rule
+    rules_by_name = _rules_in_scope(imports, corpus_state, rules)
 
     new_rules: list[Mapping[str, Any]] = []
+    processed: set[str] = set()
     for rule in rules:
         name = rule.get("name") if isinstance(rule, Mapping) else None
         if not isinstance(name, str) or name not in spec.auto_gate_outputs:
             new_rules.append(rule)
             continue
+        processed.add(name)
 
-        from .coverage import find_uncovered_eligibility_rules
+        from .coverage import find_uncovered_eligibility_rules, is_judgment_shaped
+
+        # The wrapper is an all_of conjunction — always a judgment. Gating
+        # a non-judgment output would silently retype it (#26). Checked
+        # before gate discovery so misuse fails deterministically, not
+        # only when the corpus happens to contain uncovered gates.
+        if not is_judgment_shaped(rule):
+            raise ComposeError(
+                f"auto_gate_outputs only applies to judgment outputs; "
+                f"{name!r} has dtype {rule.get('dtype')!r}"
+            )
 
         uncovered = find_uncovered_eligibility_rules(
             output=name, rules_by_name=rules_by_name
@@ -846,6 +1050,11 @@ def _apply_auto_gate_outputs(
             continue
 
         core_name = f"{name}_core"
+        if core_name in rules_by_name:
+            raise ComposeError(
+                f"auto-gate cannot rename {name!r}: {core_name!r} already "
+                "exists in scope"
+            )
         renamed_core = dict(rule)
         renamed_core["name"] = core_name
         new_rules.append(renamed_core)
@@ -866,7 +1075,7 @@ def _apply_auto_gate_outputs(
             wrapper_params["effective_from"] = effective_from
         new_rules.append(build_transformation("all_of", wrapper_params))
 
-    return new_rules
+    return new_rules, frozenset(processed)
 
 
 def _dump_yaml(payload: Mapping[str, Any]) -> bytes:

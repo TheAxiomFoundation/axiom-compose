@@ -214,7 +214,7 @@ def test_repo_loader_builds_cacheable_index_once_from_rulespec_roots(tmp_path):
     us_root = tmp_path / "rulespec-us"
     or_root = tmp_path / "rulespec-us-or"
     (us_root / "statutes/example").mkdir(parents=True)
-    (or_root / "programs").mkdir(parents=True)
+    (or_root / "policies").mkdir(parents=True)
     (us_root / "statutes/example/amount.yaml").write_text(
         """
 format: rulespec/v1
@@ -226,7 +226,7 @@ rules:
         formula: 100
 """.strip()
     )
-    (or_root / "programs/snap.yaml").write_text(
+    (or_root / "policies/snap.yaml").write_text(
         """
 format: rulespec/v1
 imports:
@@ -239,7 +239,7 @@ rules:
         formula: federal_amount
 """.strip()
     )
-    (or_root / "programs/snap.test.yaml").write_text("rules: []")
+    (or_root / "policies/snap.test.yaml").write_text("rules: []")
 
     corpus = load_corpus_from_roots([us_root, or_root], corpus_sha="repo-sha")
     spec = ProgramSpec.from_mapping(
@@ -249,9 +249,9 @@ rules:
 
     assert corpus.corpus_sha == "repo-sha"
     assert corpus.index is not None
-    assert "us-or:programs/snap.test" not in corpus.modules
+    assert "us-or:policies/snap.test" not in corpus.modules
     assert program.payload["imports"] == [
-        "us-or:programs/snap",
+        "us-or:policies/snap",
         "us:statutes/example/amount",
     ]
 

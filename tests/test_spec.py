@@ -28,3 +28,53 @@ def test_spec_requires_outputs():
                 "scope": {"federal": ["statutes/example"]},
             }
         )
+
+
+def test_to_mapping_round_trips_auto_gate_outputs():
+    spec = ProgramSpec.from_mapping(
+        {
+            "program": "us-ny/snap",
+            "period": "2026-01",
+            "outputs": ["snap_eligible"],
+            "auto_gate_outputs": ["snap_eligible"],
+        }
+    )
+    round_tripped = ProgramSpec.from_mapping(spec.to_mapping())
+    assert round_tripped == spec
+    assert round_tripped.auto_gate_outputs == ("snap_eligible",)
+
+
+def test_unknown_top_level_keys_are_rejected():
+    with pytest.raises(SpecError, match="unknown spec keys: auto_gate_output"):
+        ProgramSpec.from_mapping(
+            {
+                "program": "us/snap",
+                "period": "2026-01",
+                "outputs": ["snap_eligible"],
+                "auto_gate_output": ["snap_eligible"],
+            }
+        )
+
+
+def test_reserved_scope_filters_are_rejected_until_implemented():
+    with pytest.raises(SpecError, match="reserved but not implemented: exclude"):
+        ProgramSpec.from_mapping(
+            {
+                "program": "us/snap",
+                "period": "2026-01",
+                "outputs": ["snap_eligible"],
+                "scope": {"exclude": ["policies/old"]},
+            }
+        )
+
+
+def test_acknowledged_incomplete_must_reference_declared_outputs():
+    with pytest.raises(SpecError, match="acknowledged_incomplete not in outputs"):
+        ProgramSpec.from_mapping(
+            {
+                "program": "us/snap",
+                "period": "2026-01",
+                "outputs": ["snap_eligible"],
+                "acknowledged_incomplete": ["snap_eligibile_typo"],
+            }
+        )
