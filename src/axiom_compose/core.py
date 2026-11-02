@@ -93,6 +93,7 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
         for item in spec.transformations
     ]
     rules, gated_outputs = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
+    _assert_aggregated_relations_typed(rules)
 
     # Every declared output must resolve to an actual rule in the
     # composition — a typo'd output must not compose to a module that
@@ -160,10 +161,12 @@ def _rules_in_scope(
                 # Two imported modules defining the same rule name would
                 # otherwise resolve first-import-wins with no error, unlike
                 # discovery which raises on ambiguity (#26). Data relations
-                # are exempt: they declare runtime-supplied membership
-                # (structurally identical everywhere), and the corpus
-                # declares e.g. member_of_household in every module that
-                # scopes to it.
+                # are exempt only when both declarations have the same
+                # structure: the corpus declares e.g. member_of_household
+                # in every module that scopes to it, but once relations are
+                # typed two same-named declarations can disagree on slot
+                # kinds or orientation ([Person, Household] vs
+                # [Household, Person], or typed vs untyped) (#33).
                 both_data_relations = (
                     rule.get("kind") == "data_relation"
                     and rules_by_name[name].get("kind") == "data_relation"
@@ -172,6 +175,15 @@ def _rules_in_scope(
                     raise ComposeError(
                         f"rule {name!r} is defined by two imported modules: "
                         f"{previous} and {target}"
+                    )
+                earlier = _data_relation_shape(rules_by_name[name])
+                later = _data_relation_shape(rule)
+                if earlier != later:
+                    raise ComposeError(
+                        f"data relation {name!r} is declared differently by "
+                        f"two imported modules: {previous} declares "
+                        f"{_format_relation_shape(earlier)} and {target} "
+                        f"declares {_format_relation_shape(later)}"
                     )
             rules_by_name[name] = rule
             defined_in[name] = target
@@ -182,6 +194,82 @@ def _rules_in_scope(
             # they're the program-level override.
             rules_by_name[name] = rule
     return rules_by_name
+
+
+def _data_relation_shape(
+    rule: Mapping[str, Any],
+) -> tuple[Any, tuple[str, ...]]:
+    """(arity, slot entity kinds) of a data_relation rule.
+
+    Arguments normalize the way the engine reads them: a bare kind or the
+    older ``{name: ..., entity: ...}`` object form, whose name is
+    descriptive only. An absent or empty list is the untyped shape ``()``.
+    """
+
+    body = rule.get("data_relation")
+    if not isinstance(body, Mapping):
+        return (None, ())
+    kinds: list[str] = []
+    for argument in body.get("arguments") or ():
+        if isinstance(argument, Mapping):
+            argument = argument.get("entity")
+        kinds.append(str(argument))
+    return (body.get("arity"), tuple(kinds))
+
+
+def _format_relation_shape(shape: tuple[Any, tuple[str, ...]]) -> str:
+    arity, kinds = shape
+    typed = f"arguments [{', '.join(kinds)}]" if kinds else "no arguments"
+    return f"arity {arity} with {typed}"
+
+
+def _assert_aggregated_relations_typed(rules: list[Mapping[str, Any]]) -> None:
+    """Refuse an untyped composition-level data_relation that a composed
+    rule aggregates (#33).
+
+    Composed rules are originless, so the engine binds a short relation
+    name they read to the composition's own declaration, not to same-named
+    declarations in imported modules. The engine refuses to execute an
+    aggregation over a relation without slot kinds (``untyped_relation``),
+    so the composition must declare ``arguments`` for every relation its
+    own rules aggregate. A relation counts as aggregated when a composed
+    rule's formula names it or a composed derived_relation filters it.
+    """
+
+    untyped = {
+        rule["name"]
+        for rule in rules
+        if rule.get("kind") == "data_relation"
+        and isinstance(rule.get("name"), str)
+        and not _data_relation_shape(rule)[1]
+    }
+    if not untyped:
+        return
+    readers: dict[str, set[str]] = defaultdict(set)
+    for rule in rules:
+        name = rule.get("name")
+        derived = rule.get("derived_relation")
+        if isinstance(derived, Mapping):
+            source_relation = derived.get("source_relation")
+            if isinstance(source_relation, str) and source_relation in untyped:
+                readers[source_relation].add(str(name))
+        for version in rule.get("versions") or ():
+            formula = version.get("formula") if isinstance(version, Mapping) else None
+            if not isinstance(formula, str):
+                continue
+            for identifier in IDENT_RE.findall(formula):
+                if identifier in untyped:
+                    readers[identifier].add(str(name))
+    if readers:
+        details = "; ".join(
+            f"{relation} (read by {', '.join(sorted(readers[relation]))})"
+            for relation in sorted(readers)
+        )
+        raise ComposeError(
+            "data_relation declarations aggregated by composed rules must "
+            "declare `arguments` (one entity kind per tuple slot, in tuple "
+            f"order): {details}"
+        )
 
 
 def _assert_imports_resolve(
