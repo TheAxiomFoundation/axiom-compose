@@ -201,22 +201,31 @@ def _upstream(tmp_path: Path, *, allow_filter: bool = False) -> Path:
 
 
 @pytest.mark.parametrize("pin_in_checkout", [False, True])
-def test_pinned_tree_leaves_a_full_checkout_unchanged(tmp_path, pin_in_checkout):
+def test_pinned_tree_leaves_a_full_checkout_unchanged(
+    tmp_path, monkeypatch, pin_in_checkout
+):
     # A full (non-shallow) clone that lacks the pin is the case that a
     # `fetch --depth 1` into the checkout turned shallow. Hermetic: the
-    # "origin" is a local repository served over file://.
+    # "origin" is a local repository served over file://. A healthy checkout
+    # that holds the pin archives from itself alone, with no fetch, so it
+    # works with its origin unreachable.
     upstream = _upstream(tmp_path)
     checkout = tmp_path / "checkout"
     _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
     pin = _commit(upstream, "c.yaml", "pinned\n")
     if pin_in_checkout:
         _run("git", "fetch", "--quiet", "origin", cwd=checkout)
+        missing = str(tmp_path / "missing")
+        _run("git", "remote", "set-url", "origin", missing, cwd=checkout)
     assert (git(checkout, "cat-file", "-e", pin).returncode == 0) is pin_in_checkout
+    archived_from = _record_archive_sources(monkeypatch)
     before = git_dir_snapshot(checkout)
 
     root = extract_pinned_tree(checkout, pin, tmp_path / "work")
 
     assert git_dir_snapshot(checkout) == before
+    expected = checkout if pin_in_checkout else tmp_path / "work" / "scratch.git"
+    assert archived_from == [expected]
     assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
     assert (root / "c.yaml").read_text() == "pinned\n"
     assert not (checkout / ".git" / "shallow").exists()
@@ -260,15 +269,32 @@ def _promisor_shape(checkout: Path, shape: str) -> None:
     config.write_text(config.read_text().replace(header, header + line))
 
 
-def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
+def _record_archive_sources(monkeypatch) -> list[Path]:
+    """Record every repository ``extract_pinned_tree`` archives from."""
+
+    sources: list[Path] = []
+    archive = pinned_tree._archive
+
+    def recording(source, sha, path):
+        sources.append(source)
+        return archive(source, sha, path)
+
+    monkeypatch.setattr(pinned_tree, "_archive", recording)
+    return sources
+
+
+def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path, monkeypatch):
     # `git archive` in a blobless clone lazily fetches the missing blobs into
     # the clone's object store, so a partial clone takes the scratch path.
     checkout, pin = _blobless_clone(tmp_path)
     assert is_partial_clone(checkout)
+    archived_from = _record_archive_sources(monkeypatch)
     before = git_dir_snapshot(checkout)
 
     root = extract_pinned_tree(checkout, pin, tmp_path / "work")
 
+    # Detection, not the lazy-fetch guard, keeps archive out of the checkout.
+    assert checkout not in archived_from
     assert git_dir_snapshot(checkout) == before
     assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
     assert (root / "c.yaml").read_text() == "pinned\n"
@@ -277,13 +303,31 @@ def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
 @pytest.mark.parametrize(
     "shape", ["partialclonefilter only", "bare promisor key", "promisor = 2"]
 )
-def test_pinned_tree_detects_other_promisor_shapes(tmp_path, shape):
+def test_pinned_tree_detects_other_promisor_shapes(tmp_path, monkeypatch, shape):
     # Git treats each of these as promisor-backed. Each must be detected, so
     # the tree extracts through scratch rather than failing at `archive`.
     checkout, pin = _blobless_clone(tmp_path)
     _promisor_shape(checkout, shape)
     assert git(checkout, "config", "--get", "extensions.partialClone").stdout == ""
     assert is_partial_clone(checkout)
+    archived_from = _record_archive_sources(monkeypatch)
+    before = git_dir_snapshot(checkout)
+
+    root = extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    # Detection, not the lazy-fetch guard, keeps archive out of the checkout.
+    assert checkout not in archived_from
+    assert git_dir_snapshot(checkout) == before
+    assert (root / "c.yaml").read_text() == "pinned\n"
+
+
+def test_lazy_fetch_guard_alone_keeps_a_partial_clone_unchanged(tmp_path, monkeypatch):
+    # With detection bypassed, the tree is archived from the blobless
+    # checkout first, and only GIT_NO_LAZY_FETCH stops git from fetching the
+    # missing blobs into it. That archive fails, extraction falls back to
+    # scratch (#37), and the checkout is untouched.
+    checkout, pin = _blobless_clone(tmp_path)
+    monkeypatch.setattr(pinned_tree, "is_partial_clone", lambda repo: False)
     before = git_dir_snapshot(checkout)
 
     root = extract_pinned_tree(checkout, pin, tmp_path / "work")
@@ -292,18 +336,71 @@ def test_pinned_tree_detects_other_promisor_shapes(tmp_path, shape):
     assert (root / "c.yaml").read_text() == "pinned\n"
 
 
-def test_lazy_fetch_guard_alone_keeps_a_partial_clone_unchanged(tmp_path, monkeypatch):
-    # With detection bypassed, the tree is archived from the blobless
-    # checkout itself, and only GIT_NO_LAZY_FETCH stops git from fetching the
-    # missing blobs into it. `archive` then fails; the checkout is untouched.
+def test_pinned_tree_falls_back_to_scratch_when_checkout_archive_fails(
+    tmp_path, monkeypatch
+):
+    # A blobless clone whose promisor settings someone removed keeps its
+    # promisor pack but no longer reads as a partial clone, so the tree is
+    # archived from the checkout first. That archive fails on the missing
+    # blobs (#37); extraction must then go through scratch, still without
+    # writing to the checkout.
     checkout, pin = _blobless_clone(tmp_path)
-    monkeypatch.setattr(pinned_tree, "is_partial_clone", lambda repo: False)
+    for key in (
+        "extensions.partialClone",
+        "remote.origin.promisor",
+        "remote.origin.partialclonefilter",
+    ):
+        git(checkout, "config", "--unset", key)
+    assert not is_partial_clone(checkout)
+    assert git(checkout, "cat-file", "-e", f"{pin}^{{commit}}").returncode == 0
+    assert list((checkout / ".git" / "objects" / "pack").glob("*.promisor"))
+    archived_from = _record_archive_sources(monkeypatch)
     before = git_dir_snapshot(checkout)
 
-    with pytest.raises(AssertionError, match="promisor remote"):
+    root = extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    assert archived_from == [checkout, tmp_path / "work" / "scratch.git"]
+    assert git_dir_snapshot(checkout) == before
+    assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
+    assert (root / "c.yaml").read_text() == "pinned\n"
+
+
+def test_pinned_tree_reports_both_failures_when_the_fallback_fails(tmp_path):
+    # The checkout holds the commit but cannot archive it, and its origin is
+    # gone: that is a broken checkout, so it fails loudly instead of skipping.
+    checkout, pin = _blobless_clone(tmp_path)
+    for key in (
+        "extensions.partialClone",
+        "remote.origin.promisor",
+        "remote.origin.partialclonefilter",
+    ):
+        git(checkout, "config", "--unset", key)
+    _run("git", "remote", "set-url", "origin", str(tmp_path / "missing"), cwd=checkout)
+    before = git_dir_snapshot(checkout)
+
+    with pytest.raises(AssertionError, match="failed in the checkout") as error:
         extract_pinned_tree(checkout, pin, tmp_path / "work")
 
+    message = str(error.value)
+    assert "scratch fetch failed" in message
+    # The checkout's own git error, and the fetch error naming the origin.
+    assert "cannot read" in message
+    assert f"from {tmp_path / 'missing'}" in message
     assert git_dir_snapshot(checkout) == before
+
+
+def test_pinned_tree_reports_a_failed_scratch_archive(tmp_path, monkeypatch):
+    # The fetch into scratch succeeds but its `archive` fails: that must
+    # raise git's error, not go on to read a missing or empty tarball.
+    upstream = _upstream(tmp_path)
+    checkout = tmp_path / "checkout"
+    _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
+    pin = _commit(upstream, "c.yaml", "pinned\n")
+    failed = subprocess.CompletedProcess([], 128, b"", b"fatal: scratch archive broke")
+    monkeypatch.setattr(pinned_tree, "_archive", lambda source, sha, path: failed)
+
+    with pytest.raises(AssertionError, match="scratch archive broke"):
+        extract_pinned_tree(checkout, pin, tmp_path / "work")
 
 
 @pytest.mark.parametrize(
