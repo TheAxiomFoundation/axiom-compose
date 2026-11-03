@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,11 @@ from .transformations import build_transformation
 
 class ComposeError(ValueError):
     """Raised when a composition request cannot be satisfied."""
+
+
+class ComposeWarning(UserWarning):
+    """Issued when a composition succeeds but rests on corpus debt that a
+    later release of compose will refuse."""
 
 
 class ConceptRegistryLike(Protocol):
@@ -93,6 +99,7 @@ def compose(spec: ProgramSpec, corpus_state: CorpusState) -> RunnableProgram:
         for item in spec.transformations
     ]
     rules, gated_outputs = _apply_auto_gate_outputs(spec, corpus_state, imports, rules)
+    _assert_aggregated_relations_typed(rules)
 
     # Every declared output must resolve to an actual rule in the
     # composition — a typo'd output must not compose to a module that
@@ -137,14 +144,26 @@ def _rules_in_scope(
     imports: tuple[str, ...],
     corpus_state: CorpusState,
     synthesized_rules: list[Mapping[str, Any]],
+    *,
+    check_namesakes: bool = True,
 ) -> dict[str, Mapping[str, Any]]:
     """Unified rule map: atomic rules from imported modules plus synthesized
     transformation rules. Both sides expose `versions`-with-formulas the
     coverage analyzer understands. Synthesized rules win over corpus rules
-    of the same name — they're the program-level override."""
+    of the same name — they're the program-level override.
+
+    ``check_namesakes`` runs ``_check_data_relation_namesakes``. ``compose``
+    builds the scope twice when it auto-gates outputs, and only its own call
+    checks, so each warning is issued once per ``compose``.
+    """
 
     rules_by_name: dict[str, Mapping[str, Any]] = {}
     defined_in: dict[str, str] = {}
+    # name -> every (module target, data_relation rule) in import order, a
+    # module's repeated declarations included, for the namesake check.
+    relation_declarations: dict[str, list[tuple[str, Mapping[str, Any]]]] = defaultdict(
+        list
+    )
     for target in imports:
         module = corpus_state.modules.get(target)
         if module is None:
@@ -155,26 +174,42 @@ def _rules_in_scope(
             name = rule.get("name")
             if not isinstance(name, str) or not name:
                 continue
+            is_relation = rule.get("kind") == "data_relation"
             previous = defined_in.get(name)
             if previous is not None and previous != target:
                 # Two imported modules defining the same rule name would
                 # otherwise resolve first-import-wins with no error, unlike
                 # discovery which raises on ambiguity (#26). Data relations
-                # are exempt: they declare runtime-supplied membership
-                # (structurally identical everywhere), and the corpus
-                # declares e.g. member_of_household in every module that
-                # scopes to it.
-                both_data_relations = (
-                    rule.get("kind") == "data_relation"
-                    and rules_by_name[name].get("kind") == "data_relation"
-                )
-                if not both_data_relations:
+                # are exempt: the corpus declares e.g. member_of_household
+                # in every module that scopes to it. Their shapes are
+                # checked together after the loop, so the result does not
+                # depend on import order (#33); see
+                # _check_data_relation_namesakes.
+                if not (
+                    is_relation and rules_by_name[name].get("kind") == "data_relation"
+                ):
                     raise ComposeError(
                         f"rule {name!r} is defined by two imported modules: "
                         f"{previous} and {target}"
                     )
+            if is_relation:
+                relation_declarations[name].append((target, rule))
+                # An untyped declaration never replaces a typed namesake, so
+                # the rule in scope carries the slot kinds when any
+                # declaration has them.
+                stored = rules_by_name.get(name)
+                if (
+                    stored is not None
+                    and _data_relation_shape(stored)[1]
+                    and not _data_relation_shape(rule)[1]
+                ):
+                    continue
             rules_by_name[name] = rule
             defined_in[name] = target
+    if check_namesakes:
+        for name in sorted(relation_declarations):
+            if len(relation_declarations[name]) > 1:
+                _check_data_relation_namesakes(name, relation_declarations[name])
     for rule in synthesized_rules:
         name = rule.get("name") if isinstance(rule, Mapping) else None
         if isinstance(name, str) and name:
@@ -182,6 +217,170 @@ def _rules_in_scope(
             # they're the program-level override.
             rules_by_name[name] = rule
     return rules_by_name
+
+
+def _data_relation_shape(
+    rule: Mapping[str, Any],
+) -> tuple[Any, tuple[str, ...]]:
+    """(arity, slot entity kinds) of a data_relation rule.
+
+    Arguments normalize the way the engine reads them: a bare kind or the
+    older ``{name: ..., entity: ...}`` object form, whose name is
+    descriptive only. An absent or empty list is the untyped shape ``()``.
+    """
+
+    body = rule.get("data_relation")
+    if not isinstance(body, Mapping):
+        return (None, ())
+    kinds: list[str] = []
+    for argument in body.get("arguments") or ():
+        if isinstance(argument, Mapping):
+            argument = argument.get("entity")
+        kinds.append(str(argument))
+    return (body.get("arity"), tuple(kinds))
+
+
+def _check_data_relation_namesakes(
+    name: str, declarations: list[tuple[str, Mapping[str, Any]]]
+) -> None:
+    """Check every imported data_relation that shares a short name.
+
+    In axiom-rules-engine an imported relation is named
+    ``<module>#relation.<name>``, so namesakes in different modules are
+    separate engine relations, and the engine never merges them. When it
+    merges two declarations of one relation it lets an empty slot list take
+    a typed one, and raises ``RelationSlotEntitiesConflict`` only when both
+    lists are non-empty and differ. It refuses ``untyped_relation`` only
+    when a rule executes an aggregation over a relation with no slot kinds,
+    which ``_assert_aggregated_relations_typed`` mirrors for composed rules.
+
+    Compose resolves rules in scope by short name, so it keeps one shape
+    per name. The result depends only on the set of declarations, not on
+    import order:
+
+    - refuse when any two declarations differ in arity, or both declare
+      non-empty ``arguments`` that differ;
+    - otherwise, warn once for each untyped declaration that has a typed
+      namesake (``compose`` runs this check once, so once per ``compose``;
+      a module that declares the name twice contributes both
+      declarations). The corpus has such pairs today
+      (``us:statutes/7/2012/j#member_of_household`` is untyped while state
+      modules and ``us:policies/usda/snap/state-plan-composition`` declare
+      ``[Person, Household]``), and refusing them would block seven SNAP
+      specs that compose and that the engine does not refuse on this
+      ground. A later compose release should refuse this case once
+      rulespec-us types ``us:statutes/7/2012/j#member_of_household``, as
+      axiom-compose#36 tracks.
+
+    Declarations are visited in (module target, position in import order)
+    order, so the refused pair and the warning text are the same for every
+    import order. A warning cites the first typed declaration in that order.
+    """
+
+    ordered = sorted(
+        (
+            (target, position, _data_relation_shape(rule))
+            for position, (target, rule) in enumerate(declarations)
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    for index, (first, _, first_shape) in enumerate(ordered):
+        for second, _, second_shape in ordered[index + 1 :]:
+            (first_arity, first_kinds), (second_arity, second_kinds) = (
+                first_shape,
+                second_shape,
+            )
+            if first_arity != second_arity or (
+                first_kinds and second_kinds and first_kinds != second_kinds
+            ):
+                raise ComposeError(
+                    _namesake_detail(name, first, first_shape, second, second_shape)
+                )
+    typed = [(target, shape) for target, _, shape in ordered if shape[1]]
+    if not typed:
+        return
+    typed_target, typed_shape = typed[0]
+    for target, _, shape in ordered:
+        if shape[1]:
+            continue
+        (first, first_shape), (second, second_shape) = sorted(
+            ((target, shape), (typed_target, typed_shape)), key=lambda item: item[0]
+        )
+        warnings.warn(
+            _namesake_detail(name, first, first_shape, second, second_shape)
+            + f"; type the declaration in {target} with the same `arguments`",
+            ComposeWarning,
+            stacklevel=3,
+        )
+
+
+def _namesake_detail(
+    name: str,
+    first: str,
+    first_shape: tuple[Any, tuple[str, ...]],
+    second: str,
+    second_shape: tuple[Any, tuple[str, ...]],
+) -> str:
+    return (
+        f"data relation {name!r} is declared differently by two imported "
+        f"modules: {first} declares {_format_relation_shape(first_shape)} and "
+        f"{second} declares {_format_relation_shape(second_shape)}"
+    )
+
+
+def _format_relation_shape(shape: tuple[Any, tuple[str, ...]]) -> str:
+    arity, kinds = shape
+    typed = f"arguments [{', '.join(kinds)}]" if kinds else "no arguments"
+    return f"arity {arity} with {typed}"
+
+
+def _assert_aggregated_relations_typed(rules: list[Mapping[str, Any]]) -> None:
+    """Refuse an untyped composition-level data_relation that a composed
+    rule aggregates (#33).
+
+    Composed rules are originless, so the engine binds a short relation
+    name they read to the composition's own declaration, not to same-named
+    declarations in imported modules. The engine refuses to execute an
+    aggregation over a relation without slot kinds (``untyped_relation``),
+    so the composition must declare ``arguments`` for every relation its
+    own rules aggregate. A relation counts as aggregated when a composed
+    rule's formula names it or a composed derived_relation filters it.
+    """
+
+    untyped = {
+        rule["name"]
+        for rule in rules
+        if rule.get("kind") == "data_relation"
+        and isinstance(rule.get("name"), str)
+        and not _data_relation_shape(rule)[1]
+    }
+    if not untyped:
+        return
+    readers: dict[str, set[str]] = defaultdict(set)
+    for rule in rules:
+        name = rule.get("name")
+        derived = rule.get("derived_relation")
+        if isinstance(derived, Mapping):
+            source_relation = derived.get("source_relation")
+            if isinstance(source_relation, str) and source_relation in untyped:
+                readers[source_relation].add(str(name))
+        for version in rule.get("versions") or ():
+            formula = version.get("formula") if isinstance(version, Mapping) else None
+            if not isinstance(formula, str):
+                continue
+            for identifier in IDENT_RE.findall(formula):
+                if identifier in untyped:
+                    readers[identifier].add(str(name))
+    if readers:
+        details = "; ".join(
+            f"{relation} (read by {', '.join(sorted(readers[relation]))})"
+            for relation in sorted(readers)
+        )
+        raise ComposeError(
+            "data_relation declarations aggregated by composed rules must "
+            "declare `arguments` (one entity kind per tuple slot, in tuple "
+            f"order): {details}"
+        )
 
 
 def _assert_imports_resolve(
@@ -1000,7 +1199,8 @@ def _apply_auto_gate_outputs(
     if not spec.auto_gate_outputs:
         return rules, frozenset()
 
-    rules_by_name = _rules_in_scope(imports, corpus_state, rules)
+    # compose checks namesakes on its own scope call, after this one.
+    rules_by_name = _rules_in_scope(imports, corpus_state, rules, check_namesakes=False)
 
     new_rules: list[Mapping[str, Any]] = []
     processed: set[str] = set()

@@ -196,7 +196,16 @@ def derived_formula(parameters: Mapping[str, Any]) -> Rule:
 
 
 def data_relation(parameters: Mapping[str, Any]) -> Rule:
-    """Create a data_relation rule for entity membership supplied at runtime."""
+    """Create a data_relation rule for entity membership supplied at runtime.
+
+    ``arguments`` lists the entity kind of each tuple slot, in tuple order
+    (e.g. ``[Person, Household]``). axiom-rules-engine refuses to execute an
+    aggregation over a relation without slot kinds (``untyped_relation``),
+    because a tuple stored in the other orientation would aggregate nothing.
+    The pattern alone cannot see whether the relation is aggregated, so
+    ``arguments`` is optional here and ``compose`` requires it when a rule in
+    the composition aggregates the relation.
+    """
 
     name = _identifier(parameters, "name")
     arity = _positive_int(parameters, "arity")
@@ -205,10 +214,20 @@ def data_relation(parameters: Mapping[str, Any]) -> Rule:
         "source",
         default=f"axiom-compose:{parameters.get('pattern', 'data_relation')}",
     )
+    relation: dict[str, Any] = {"arity": arity}
+    if "arguments" in parameters:
+        arguments = _entity_kinds(parameters, "arguments")
+        if len(arguments) != arity:
+            raise TransformationError(
+                f"data_relation {name!r} declares arity {arity} but "
+                f"{len(arguments)} arguments; give one entity kind per "
+                "tuple slot"
+            )
+        relation["arguments"] = list(arguments)
     return {
         "name": name,
         "kind": "data_relation",
-        "data_relation": {"arity": arity},
+        "data_relation": relation,
         "source": source,
     }
 
@@ -294,6 +313,28 @@ def _strings(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
     if isinstance(value, str) or not isinstance(value, list | tuple):
         raise TransformationError(f"{key} must be a list of strings")
     return tuple(_string({key: item}, key) for item in value)
+
+
+# The engine's entity-kind label shape: an ASCII uppercase letter, then
+# ASCII letters and digits (axiom-rules-engine `is_relation_entity_kind_label`).
+_ENTITY_KIND_RE = re.compile(r"[A-Z][A-Za-z0-9]*")
+
+
+def _entity_kinds(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
+    """List of UpperCamelCase entity kinds (e.g. arguments = [Person, Household])."""
+
+    value = parameters.get(key)
+    if isinstance(value, str) or not isinstance(value, list | tuple) or not value:
+        raise TransformationError(f"{key} must be a non-empty list of entity kinds")
+    kinds = []
+    for item in value:
+        # No strip: the emitted label must be exactly what the spec wrote.
+        if not isinstance(item, str) or not _ENTITY_KIND_RE.fullmatch(item):
+            raise TransformationError(
+                f"{key} entries must be UpperCamelCase entity kinds, got {item!r}"
+            )
+        kinds.append(item)
+    return tuple(kinds)
 
 
 def _positive_int(parameters: Mapping[str, Any], key: str) -> int:

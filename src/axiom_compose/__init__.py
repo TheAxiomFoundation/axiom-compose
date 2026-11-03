@@ -1,6 +1,8 @@
 """Deterministic RuleSpec composition."""
 
 from .core import (
+    ComposeError,
+    ComposeWarning,
     CorpusIndex,
     CorpusState,
     RuleSpecModule,
@@ -12,6 +14,8 @@ from .core import (
 from .spec import ProgramSpec, load_spec
 
 __all__ = [
+    "ComposeError",
+    "ComposeWarning",
     "CorpusState",
     "CorpusIndex",
     "ProgramSpec",
