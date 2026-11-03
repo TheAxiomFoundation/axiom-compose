@@ -99,26 +99,9 @@ def _fetch_into_scratch(checkout: Path, sha: str, scratch: Path) -> Path:
     return scratch
 
 
-def extract_pinned_tree(checkout: Path, sha: str, work: Path) -> Path:
-    """Write the tree of ``sha`` to ``work/rulespec-us`` and return that path.
-
-    Reads from ``checkout`` only when it has the commit and is not a partial
-    clone (``cat-file``, ``config --get`` and ``archive`` then write
-    nothing). Otherwise fetches the commit at depth 1 from the checkout's
-    origin URL into ``work/scratch.git``, a bare repository that is not the
-    checkout. ``work`` must be empty or absent.
-    """
-
-    source = checkout
-    if is_partial_clone(checkout) or not _has_commit(checkout, sha):
-        source = _fetch_into_scratch(checkout, sha, work / "scratch.git")
-    # The directory name matters: the loader reads the country from
-    # `rulespec-<country>`.
-    root = work / "rulespec-us"
-    root.mkdir(parents=True)
-    archive = work / "tree.tar"
+def _archive(source: Path, sha: str, archive: Path) -> subprocess.CompletedProcess:
     with archive.open("wb") as handle:
-        archived = subprocess.run(
+        return subprocess.run(
             ["git", "-C", str(source), "archive", sha],
             stdout=handle,
             stderr=subprocess.PIPE,
@@ -128,6 +111,43 @@ def extract_pinned_tree(checkout: Path, sha: str, work: Path) -> Path:
             # `archive` fails instead of writing into the source repository.
             env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
         )
+
+
+def extract_pinned_tree(checkout: Path, sha: str, work: Path) -> Path:
+    """Write the tree of ``sha`` to ``work/rulespec-us`` and return that path.
+
+    Reads from ``checkout`` when it has the commit and is not a partial
+    clone (``cat-file``, ``config --get``, ``config --get-regexp`` and
+    ``archive`` then write nothing). Otherwise, or when that ``archive``
+    fails (a checkout can still miss objects, e.g. a former partial clone
+    whose promisor settings were removed but whose promisor pack remains),
+    fetches the commit at depth 1 from the checkout's origin URL into
+    ``work/scratch.git``, a bare repository that is not the checkout, and
+    archives from there. ``work`` must be empty or absent.
+    """
+
+    # The directory name matters: the loader reads the country from
+    # `rulespec-<country>`.
+    root = work / "rulespec-us"
+    root.mkdir(parents=True)
+    archive = work / "tree.tar"
+    scratch = work / "scratch.git"
+    if is_partial_clone(checkout) or not _has_commit(checkout, sha):
+        archived = _archive(_fetch_into_scratch(checkout, sha, scratch), sha, archive)
+    else:
+        archived = _archive(checkout, sha, archive)
+        if archived.returncode:
+            checkout_error = archived.stderr.decode(errors="replace")
+            try:
+                source = _fetch_into_scratch(checkout, sha, scratch)
+            except PinUnavailable as error:
+                # The checkout has the commit but cannot produce its tree:
+                # report both failures rather than skip.
+                raise AssertionError(
+                    f"git archive failed in the checkout:\n{checkout_error}\n"
+                    f"and the scratch fetch failed: {error}"
+                ) from error
+            archived = _archive(source, sha, archive)
     if archived.returncode:
         raise AssertionError(archived.stderr.decode(errors="replace"))
     with tarfile.open(archive) as tar:
