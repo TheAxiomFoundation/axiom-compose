@@ -3,12 +3,17 @@
 The checkout a developer points ``AXIOM_RULESPEC_US_ROOT`` at must never be
 written to. ``git fetch --depth 1`` into a full clone writes ``.git/shallow``
 and grafts the fetched commit as a parentless root, which breaks later
-merges there. So when the checkout lacks the pin, the commit is fetched into
-a throwaway repository instead, and the tree is archived from that.
+merges there. ``git archive`` in a partial clone lazily fetches missing
+blobs into its object store. So the tree is read from the checkout only
+when the checkout has the commit and is not a partial clone; otherwise the
+commit is fetched into a throwaway repository and archived from that.
 """
 
 from __future__ import annotations
 
+import hashlib
+import os
+import re
 import subprocess
 import tarfile
 from pathlib import Path
@@ -31,16 +36,49 @@ def _has_commit(repo: Path, sha: str) -> bool:
     return git(repo, "cat-file", "-e", f"{sha}^{{commit}}").returncode == 0
 
 
+def is_partial_clone(repo: Path) -> bool:
+    """True when ``extensions.partialClone`` is set or any remote is a promisor."""
+
+    if git(repo, "config", "--get", "extensions.partialClone").stdout.strip():
+        return True
+    promisors = git(repo, "config", "--get-regexp", r"^remote\..*\.promisor$")
+    return any(
+        line.split(None, 1)[-1].strip().lower() in {"true", "yes", "on", "1"}
+        for line in promisors.stdout.splitlines()
+    )
+
+
+# URL forms git does not read as a local path: `scheme://...` and the
+# scp-like `[user@]host:path` (a colon before any slash).
+_URL_RE = re.compile(r"^[A-Za-z][A-Za-z0-9+.-]*://|^[^/]*:")
+
+
+def fetch_source(checkout: Path, url: str) -> str:
+    """The checkout's origin URL as the scratch repository must see it.
+
+    A relative local path (``../up``) names a path relative to the
+    checkout, but the fetch runs in the scratch repository, so it is
+    resolved against the checkout first. URLs, scp-like forms and absolute
+    paths pass through unchanged. So does anything starting with ``-``,
+    which is not a path anyone means; ``--`` in the fetch refuses it.
+    """
+
+    if url.startswith("-") or _URL_RE.match(url) or os.path.isabs(url):
+        return url
+    return str((checkout / url).resolve())
+
+
 def _fetch_into_scratch(checkout: Path, sha: str, scratch: Path) -> Path:
     remote = git(checkout, "remote", "get-url", "origin")
     if remote.returncode:
         raise PinUnavailable(f"checkout has no origin remote: {remote.stderr}")
-    url = remote.stdout.strip()
+    url = fetch_source(checkout, remote.stdout.strip())
     scratch.mkdir(parents=True)
     initialized = git(scratch, "init", "--quiet", "--bare")
     if initialized.returncode:
         raise PinUnavailable(initialized.stderr)
-    fetched = git(scratch, "fetch", "--quiet", "--depth", "1", url, sha)
+    # `--` keeps a URL that starts with `-` from being read as an option.
+    fetched = git(scratch, "fetch", "--quiet", "--depth", "1", "--", url, sha)
     if fetched.returncode or not _has_commit(scratch, sha):
         raise PinUnavailable(f"cannot fetch {sha} from {url}: {fetched.stderr[-500:]}")
     return scratch
@@ -49,14 +87,15 @@ def _fetch_into_scratch(checkout: Path, sha: str, scratch: Path) -> Path:
 def extract_pinned_tree(checkout: Path, sha: str, work: Path) -> Path:
     """Write the tree of ``sha`` to ``work/rulespec-us`` and return that path.
 
-    Reads from ``checkout`` when it has the commit (``cat-file`` and
-    ``archive`` write nothing). Otherwise fetches the commit at depth 1 from
-    the checkout's origin URL into ``work/scratch.git``, a bare repository
-    that is not the checkout. ``work`` must be empty or absent.
+    Reads from ``checkout`` only when it has the commit and is not a partial
+    clone (``cat-file``, ``config --get`` and ``archive`` then write
+    nothing). Otherwise fetches the commit at depth 1 from the checkout's
+    origin URL into ``work/scratch.git``, a bare repository that is not the
+    checkout. ``work`` must be empty or absent.
     """
 
     source = checkout
-    if not _has_commit(checkout, sha):
+    if is_partial_clone(checkout) or not _has_commit(checkout, sha):
         source = _fetch_into_scratch(checkout, sha, work / "scratch.git")
     # The directory name matters: the loader reads the country from
     # `rulespec-<country>`.
@@ -69,6 +108,10 @@ def extract_pinned_tree(checkout: Path, sha: str, work: Path) -> Path:
             stdout=handle,
             stderr=subprocess.PIPE,
             check=False,
+            # Second guard: with GIT_NO_LAZY_FETCH=1, git refuses to fetch a
+            # missing object from a promisor remote (git 2.43 does), so
+            # `archive` fails instead of writing into the source repository.
+            env={**os.environ, "GIT_NO_LAZY_FETCH": "1"},
         )
     if archived.returncode:
         raise AssertionError(archived.stderr.decode(errors="replace"))
@@ -78,15 +121,19 @@ def extract_pinned_tree(checkout: Path, sha: str, work: Path) -> Path:
     return root
 
 
-def repository_state(repo: Path) -> dict[str, object]:
-    """What the pinned fixture must leave unchanged in a checkout."""
+def git_dir_snapshot(repo: Path) -> dict[str, tuple[str, int]]:
+    """(sha256, mtime_ns) of every file under ``repo/.git``, keyed by path.
 
-    git_dir = Path(git(repo, "rev-parse", "--absolute-git-dir").stdout.strip())
-    shallow = git_dir / "shallow"
+    Reads the filesystem only and runs no git command, so taking it cannot
+    itself refresh the index or write anything else.
+    """
+
+    git_dir = repo / ".git"
     return {
-        "is_shallow": git(repo, "rev-parse", "--is-shallow-repository").stdout.strip(),
-        "shallow_file": shallow.read_text() if shallow.exists() else None,
-        "refs": git(repo, "for-each-ref", "--format=%(refname) %(objectname)").stdout,
-        "head": git(repo, "rev-parse", "HEAD").stdout.strip(),
-        "status": git(repo, "status", "--porcelain").stdout,
+        str(path.relative_to(git_dir)): (
+            hashlib.sha256(path.read_bytes()).hexdigest(),
+            path.stat().st_mtime_ns,
+        )
+        for path in sorted(git_dir.rglob("*"))
+        if path.is_file()
     }

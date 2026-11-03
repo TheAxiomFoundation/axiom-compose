@@ -24,16 +24,14 @@ import pytest
 import yaml
 
 # Known corpus/engine mismatches that block a compile today. Each entry maps
-# engine stderr fragments, all of which must appear, to the reason the test
-# cites when it xfails. A fixed corpus turns the xfail into a real run, and
-# any other failure, including the same error from another module, fails.
+# one exact engine message fragment to the reason the test cites when it
+# xfails. A fixed corpus turns the xfail into a real run, and any other
+# failure, including the same error from another module, fails.
 KNOWN_COMPILE_BLOCKERS = (
     (
-        (
-            # The engine names the module by its id (`us:...`), not its path.
-            "RuleSpec module `us:policies/irs/rev-proc-2025-32/earned-income-credit`",
-            "declares removed plural `corpus_citation_paths`",
-        ),
+        # The engine names the module by its id (`us:...`), not its path.
+        "RuleSpec module `us:policies/irs/rev-proc-2025-32/earned-income-credit` "
+        "declares removed plural `corpus_citation_paths`",
         "us:policies/irs/rev-proc-2025-32/earned-income-credit uses the "
         "plural `corpus_citation_paths` key that the engine removed "
         "(rulespec-us#1312); rulespec-us lists it in "
@@ -45,8 +43,8 @@ KNOWN_COMPILE_BLOCKERS = (
 def known_blocker(stderr: str) -> str | None:
     """The reason for a known compile blocker in ``stderr``, if any."""
 
-    for fragments, reason in KNOWN_COMPILE_BLOCKERS:
-        if all(fragment in stderr for fragment in fragments):
+    for fragment, reason in KNOWN_COMPILE_BLOCKERS:
+        if fragment in stderr:
             return reason
     return None
 

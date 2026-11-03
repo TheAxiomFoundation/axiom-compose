@@ -87,6 +87,12 @@ def test_known_blocker_matches_the_eitc_module_error():
         f"failed to parse formula `1 + * )` in `{EITC_MODULE}`",
         # A formula syntax error with no module error fails.
         "expected expression, found `*` at 1:5",
+        # The bare id, or another module ending in it, does not match.
+        _plural_error("earned-income-credit"),
+        _plural_error("us-ca:policies/ftb/earned-income-credit"),
+        # The module and the plural error in two separate messages.
+        f"RuleSpec module `{EITC_MODULE}` declares non-canonical "
+        "corpus_citation_path `x`\n" + _plural_error("us:statutes/26/3101/a"),
     ],
 )
 def test_known_blocker_rejects_anything_else(stderr):

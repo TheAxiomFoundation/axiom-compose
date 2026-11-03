@@ -5,6 +5,8 @@ and ``tests/test_real_round_trip.py`` both compose against the
 ``AXIOM_RULESPEC_US_ROOT`` checkout, so they share this module's cache instead
 of each loading the checkout again. ``corpus_sha`` only feeds the composed
 module's summary line, so each caller relabels the shared state with its own.
+The relabeled states share one ``modules`` mapping and index, so tests must
+not mutate the corpus state they get from here.
 """
 
 from __future__ import annotations

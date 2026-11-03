@@ -15,10 +15,10 @@ Two checks per case:
   change.
 
 The pinned tree comes from the checkout at ``AXIOM_RULESPEC_US_ROOT`` when it
-has the commit. When it lacks it (CI checks out depth 1), the commit is
-fetched at depth 1 from the checkout's origin URL into a throwaway bare
-repository, never into the checkout (``tests/pinned_tree.py``). Without the
-env var, or if the fetch fails, the pinned tests skip.
+has the commit and is not a partial clone. Otherwise (CI checks out depth 1),
+the commit is fetched at depth 1 from the checkout's origin URL into a
+throwaway bare repository, never into the checkout (``tests/pinned_tree.py``).
+Without the env var, or if the fetch fails, the pinned tests skip.
 """
 
 import os
@@ -30,7 +30,8 @@ from pinned_tree import (
     PinUnavailable,
     extract_pinned_tree,
     git,
-    repository_state,
+    git_dir_snapshot,
+    is_partial_clone,
 )
 from real_corpus import corpus
 
@@ -179,46 +180,132 @@ def _commit(repo: Path, name: str, text: str) -> str:
     return _run("git", "rev-parse", "HEAD", cwd=repo)
 
 
+def _upstream(tmp_path: Path, *, allow_filter: bool = False) -> Path:
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _run("git", "init", "--quiet", cwd=upstream)
+    _run("git", "config", "uploadpack.allowAnySHA1InWant", "true", cwd=upstream)
+    if allow_filter:
+        _run("git", "config", "uploadpack.allowFilter", "true", cwd=upstream)
+    _commit(upstream, "a.yaml", "first\n")
+    _commit(upstream, "b.yaml", "second\n")
+    return upstream
+
+
+# Every test below snapshots every file under the checkout's `.git` (path,
+# sha256, mtime) right before and right after `extract_pinned_tree`, with no
+# git command in between, so any write (objects, config, index, refs,
+# FETCH_HEAD, shallow) fails it.
+
+
 @pytest.mark.parametrize("pin_in_checkout", [False, True])
 def test_pinned_tree_leaves_a_full_checkout_unchanged(tmp_path, pin_in_checkout):
     # A full (non-shallow) clone that lacks the pin is the case that a
     # `fetch --depth 1` into the checkout turned shallow. Hermetic: the
     # "origin" is a local repository served over file://.
-    upstream = tmp_path / "upstream"
-    upstream.mkdir()
-    _run("git", "init", "--quiet", cwd=upstream)
-    _run("git", "config", "uploadpack.allowAnySHA1InWant", "true", cwd=upstream)
-    _commit(upstream, "a.yaml", "first\n")
-    _commit(upstream, "b.yaml", "second\n")
+    upstream = _upstream(tmp_path)
     checkout = tmp_path / "checkout"
     _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
     pin = _commit(upstream, "c.yaml", "pinned\n")
     if pin_in_checkout:
         _run("git", "fetch", "--quiet", "origin", cwd=checkout)
-    before = repository_state(checkout)
-    assert before["is_shallow"] == "false" and before["shallow_file"] is None
     assert (git(checkout, "cat-file", "-e", pin).returncode == 0) is pin_in_checkout
-    history = _run("git", "rev-list", "--count", "--all", cwd=checkout)
+    before = git_dir_snapshot(checkout)
 
     root = extract_pinned_tree(checkout, pin, tmp_path / "work")
 
+    assert git_dir_snapshot(checkout) == before
     assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
     assert (root / "c.yaml").read_text() == "pinned\n"
-    assert repository_state(checkout) == before
-    assert _run("git", "rev-list", "--count", "--all", cwd=checkout) == history
-    assert (git(checkout, "cat-file", "-e", pin).returncode == 0) is pin_in_checkout
+    assert not (checkout / ".git" / "shallow").exists()
+
+
+def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
+    # `git archive` in a blobless clone lazily fetches the missing blobs into
+    # the clone's object store, so a partial clone takes the scratch path.
+    upstream = _upstream(tmp_path, allow_filter=True)
+    pin = _commit(upstream, "c.yaml", "pinned\n")
+    checkout = tmp_path / "checkout"
+    _run(
+        "git",
+        "clone",
+        "--quiet",
+        "--filter=blob:none",
+        "--no-checkout",
+        upstream.as_uri(),
+        str(checkout),
+        cwd=tmp_path,
+    )
+    assert is_partial_clone(checkout)
+    before = git_dir_snapshot(checkout)
+
+    root = extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    assert git_dir_snapshot(checkout) == before
+    assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
+    assert (root / "c.yaml").read_text() == "pinned\n"
+
+
+@pytest.mark.parametrize(
+    ("config", "partial"),
+    [
+        ({}, False),
+        ({"extensions.partialClone": "origin"}, True),
+        ({"remote.mirror.promisor": "true"}, True),
+        ({"remote.mirror.promisor": "false"}, False),
+    ],
+)
+def test_partial_clone_detection(tmp_path, config, partial):
+    _run("git", "init", "--quiet", cwd=tmp_path)
+    for key, value in config.items():
+        _run("git", "config", key, value, cwd=tmp_path)
+    assert is_partial_clone(tmp_path) is partial
+
+
+def test_pinned_tree_resolves_a_relative_origin_against_the_checkout(tmp_path):
+    upstream = _upstream(tmp_path)
+    checkout = tmp_path / "checkout"
+    _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
+    pin = _commit(upstream, "c.yaml", "pinned\n")
+    _run("git", "remote", "set-url", "origin", "../upstream", cwd=checkout)
+    before = git_dir_snapshot(checkout)
+
+    root = extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    assert git_dir_snapshot(checkout) == before
+    assert (root / "c.yaml").read_text() == "pinned\n"
+
+
+def test_pinned_tree_does_not_read_an_origin_url_as_an_option(tmp_path):
+    upstream = _upstream(tmp_path)
+    checkout = tmp_path / "checkout"
+    _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
+    marker = tmp_path / "marker"
+    # `git remote set-url` would itself read the value as an option.
+    _run(
+        "git",
+        "config",
+        "--",
+        "remote.origin.url",
+        f"--upload-pack=touch {marker}",
+        cwd=checkout,
+    )
+    before = git_dir_snapshot(checkout)
+
+    with pytest.raises(PinUnavailable):
+        extract_pinned_tree(checkout, "1" * 40, tmp_path / "work")
+
+    assert not marker.exists()
+    assert git_dir_snapshot(checkout) == before
 
 
 def test_pinned_tree_reports_an_unfetchable_pin(tmp_path):
-    upstream = tmp_path / "upstream"
-    upstream.mkdir()
-    _run("git", "init", "--quiet", cwd=upstream)
-    _commit(upstream, "a.yaml", "first\n")
+    upstream = _upstream(tmp_path)
     checkout = tmp_path / "checkout"
     _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
-    before = repository_state(checkout)
+    before = git_dir_snapshot(checkout)
 
     with pytest.raises(PinUnavailable):
         extract_pinned_tree(checkout, "0" * 40, tmp_path / "work")
 
-    assert repository_state(checkout) == before
+    assert git_dir_snapshot(checkout) == before
