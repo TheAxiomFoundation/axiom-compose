@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+import warnings
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -17,6 +18,11 @@ from .transformations import build_transformation
 
 class ComposeError(ValueError):
     """Raised when a composition request cannot be satisfied."""
+
+
+class ComposeWarning(UserWarning):
+    """Issued when a composition succeeds but rests on corpus debt that a
+    later release of compose will refuse."""
 
 
 class ConceptRegistryLike(Protocol):
@@ -161,12 +167,14 @@ def _rules_in_scope(
                 # Two imported modules defining the same rule name would
                 # otherwise resolve first-import-wins with no error, unlike
                 # discovery which raises on ambiguity (#26). Data relations
-                # are exempt only when both declarations have the same
+                # are exempt when both declarations have the same
                 # structure: the corpus declares e.g. member_of_household
-                # in every module that scopes to it, but once relations are
-                # typed two same-named declarations can disagree on slot
+                # in every module that scopes to it. Once relations are
+                # typed, two same-named declarations can disagree on slot
                 # kinds or orientation ([Person, Household] vs
-                # [Household, Person], or typed vs untyped) (#33).
+                # [Household, Person]), which refuses, or one can be
+                # untyped, which warns for now (#33); see
+                # _check_data_relation_namesakes.
                 both_data_relations = (
                     rule.get("kind") == "data_relation"
                     and rules_by_name[name].get("kind") == "data_relation"
@@ -176,15 +184,9 @@ def _rules_in_scope(
                         f"rule {name!r} is defined by two imported modules: "
                         f"{previous} and {target}"
                     )
-                earlier = _data_relation_shape(rules_by_name[name])
-                later = _data_relation_shape(rule)
-                if earlier != later:
-                    raise ComposeError(
-                        f"data relation {name!r} is declared differently by "
-                        f"two imported modules: {previous} declares "
-                        f"{_format_relation_shape(earlier)} and {target} "
-                        f"declares {_format_relation_shape(later)}"
-                    )
+                _check_data_relation_namesakes(
+                    name, previous, rules_by_name[name], target, rule
+                )
             rules_by_name[name] = rule
             defined_in[name] = target
     for rule in synthesized_rules:
@@ -215,6 +217,58 @@ def _data_relation_shape(
             argument = argument.get("entity")
         kinds.append(str(argument))
     return (body.get("arity"), tuple(kinds))
+
+
+def _check_data_relation_namesakes(
+    name: str,
+    previous: str,
+    earlier_rule: Mapping[str, Any],
+    target: str,
+    later_rule: Mapping[str, Any],
+) -> None:
+    """Compare two imported data_relations that share a short name.
+
+    In axiom-rules-engine an imported relation is named
+    ``<module>#relation.<name>``, so namesakes in different modules are
+    separate engine relations. When the engine merges two declarations of
+    one relation it lets an empty slot list take a typed one, and raises
+    ``RelationSlotEntitiesConflict`` only when both lists are non-empty and
+    differ. It refuses ``untyped_relation`` only when a rule executes an
+    aggregation over a relation with no slot kinds, which
+    ``_assert_aggregated_relations_typed`` mirrors for composed rules.
+
+    Compose resolves rules in scope by short name, so it keeps one shape
+    per name:
+
+    - a different arity, or two different non-empty ``arguments`` lists,
+      cannot be one relation and refuses;
+    - a typed declaration beside an untyped one warns. The corpus has such
+      pairs today (``us:statutes/7/2012/j#member_of_household`` is untyped
+      while state modules and ``us:policies/usda/snap/state-plan-composition``
+      declare ``[Person, Household]``), and refusing them would block seven
+      SNAP specs that compose and that the engine does not refuse on this
+      ground. This becomes a refusal once the corpus types
+      ``us:statutes/7/2012/j#member_of_household``.
+    """
+
+    earlier = _data_relation_shape(earlier_rule)
+    later = _data_relation_shape(later_rule)
+    if earlier == later:
+        return
+    detail = (
+        f"data relation {name!r} is declared differently by two imported "
+        f"modules: {previous} declares {_format_relation_shape(earlier)} and "
+        f"{target} declares {_format_relation_shape(later)}"
+    )
+    (earlier_arity, earlier_kinds), (later_arity, later_kinds) = earlier, later
+    if earlier_arity == later_arity and not (earlier_kinds and later_kinds):
+        warnings.warn(
+            detail + "; type the untyped declaration with the same `arguments`",
+            ComposeWarning,
+            stacklevel=2,
+        )
+        return
+    raise ComposeError(detail)
 
 
 def _format_relation_shape(shape: tuple[Any, tuple[str, ...]]) -> str:

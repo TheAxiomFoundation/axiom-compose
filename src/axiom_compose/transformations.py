@@ -317,7 +317,7 @@ def _strings(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
 
 # The engine's entity-kind label shape: an ASCII uppercase letter, then
 # ASCII letters and digits (axiom-rules-engine `is_relation_entity_kind_label`).
-_ENTITY_KIND_RE = re.compile(r"^[A-Z][A-Za-z0-9]*$")
+_ENTITY_KIND_RE = re.compile(r"[A-Z][A-Za-z0-9]*")
 
 
 def _entity_kinds(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
@@ -329,7 +329,7 @@ def _entity_kinds(parameters: Mapping[str, Any], key: str) -> tuple[str, ...]:
     kinds = []
     for item in value:
         # No strip: the emitted label must be exactly what the spec wrote.
-        if not isinstance(item, str) or not _ENTITY_KIND_RE.match(item):
+        if not isinstance(item, str) or not _ENTITY_KIND_RE.fullmatch(item):
             raise TransformationError(
                 f"{key} entries must be UpperCamelCase entity kinds, got {item!r}"
             )

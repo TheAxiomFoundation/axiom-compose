@@ -13,6 +13,7 @@ import os
 import random
 import string
 import subprocess
+import warnings
 from pathlib import Path
 
 import pytest
@@ -24,7 +25,7 @@ from axiom_compose import (
     compose,
     load_corpus_from_roots,
 )
-from axiom_compose.core import ComposeError
+from axiom_compose.core import ComposeError, ComposeWarning
 from axiom_compose.spec import ProgramSpec
 from axiom_compose.transformations import TransformationError, build_transformation
 
@@ -84,6 +85,8 @@ def test_data_relation_refuses_argument_count_that_differs_from_arity(arguments)
         ["Person", "tax_unit"],
         ["Person", "Tax Unit"],
         ["Person", " Household"],
+        ["Person\n", "Household"],
+        ["Person", "Household\n"],
         ["Person", 3],
         ["Person", {"entity": "Household"}],
     ],
@@ -244,6 +247,7 @@ def _compose_two_declarations(first: dict, second: dict):
     return compose(spec, CorpusState(modules=modules))
 
 
+@pytest.mark.filterwarnings("error::axiom_compose.core.ComposeWarning")
 def test_identical_imported_relations_stay_exempt():
     typed = {"arity": 2, "arguments": ["Person", "Household"]}
 
@@ -252,12 +256,14 @@ def test_identical_imported_relations_stay_exempt():
     assert program.payload["imports"] == ["us:a", "us:b"]
 
 
+@pytest.mark.filterwarnings("error::axiom_compose.core.ComposeWarning")
 def test_identical_untyped_imported_relations_stay_exempt():
     program = _compose_two_declarations({"arity": 2}, {"arity": 2})
 
     assert program.payload["imports"] == ["us:a", "us:b"]
 
 
+@pytest.mark.filterwarnings("error::axiom_compose.core.ComposeWarning")
 def test_object_form_arguments_match_compact_form():
     # The engine reads `{name, entity}` arguments as their entity; the
     # descriptive name does not change the relation's type.
@@ -286,14 +292,79 @@ def test_object_form_arguments_match_compact_form():
             {"arity": 2, "arguments": ["Person", "Household"]},
             {"arity": 2, "arguments": ["Person", "TaxUnit"]},
         ),
-        ({"arity": 2}, {"arity": 2, "arguments": ["Person", "Household"]}),
         ({"arity": 2}, {"arity": 3}),
+        ({"arity": 2}, {"arity": 3, "arguments": ["Person", "Household", "Year"]}),
     ],
 )
 def test_imported_relations_with_different_declarations_refuse(first, second):
-    with pytest.raises(ComposeError, match="declared differently") as error:
-        _compose_two_declarations(first, second)
-    assert "us:a" in str(error.value) and "us:b" in str(error.value)
+    # Two different non-empty slot lists, or a different arity, cannot be one
+    # relation: the engine raises RelationSlotEntitiesConflict (or
+    # RelationArityConflict) when it merges such declarations.
+    for a, b in ((first, second), (second, first)):
+        with pytest.raises(ComposeError, match="declared differently") as error:
+            _compose_two_declarations(a, b)
+        assert "us:a" in str(error.value) and "us:b" in str(error.value)
+
+
+@pytest.mark.parametrize("typed_first", [True, False])
+def test_typed_beside_untyped_imported_relation_warns_and_composes(typed_first):
+    # The corpus pairs an untyped us:statutes/7/2012/j#member_of_household
+    # with typed state declarations. That warns until the corpus types it.
+    typed = {"arity": 2, "arguments": ["Person", "Household"]}
+    untyped = {"arity": 2}
+    first, second = (typed, untyped) if typed_first else (untyped, typed)
+
+    with pytest.warns(ComposeWarning, match="declared differently") as record:
+        program = _compose_two_declarations(first, second)
+
+    assert program.payload["imports"] == ["us:a", "us:b"]
+    message = str(record[0].message)
+    assert "us:a" in message and "us:b" in message
+    assert "no arguments" in message and "[Person, Household]" in message
+
+
+def _random_shape(rng: random.Random) -> dict:
+    arity = rng.choice((2, 3))
+    shape: dict = {"arity": arity}
+    if rng.random() < 0.6:
+        shape["arguments"] = [
+            rng.choice(("Person", "Household", "TaxUnit")) for _ in range(arity)
+        ]
+    return shape
+
+
+@pytest.mark.parametrize("seed", range(200))
+def test_property_namesake_relations_refuse_warn_or_pass(seed):
+    # Invariant: two same-named imported data_relations
+    # - compose silently when arity and slot kinds are equal;
+    # - warn when arity is equal and exactly one side is untyped;
+    # - refuse otherwise (different arity, or two different typed lists).
+    # The outcome does not depend on import order.
+    rng = random.Random(seed)
+    first, second = _random_shape(rng), _random_shape(rng)
+    if rng.random() < 0.25:
+        second = dict(first)
+    same_arity = first["arity"] == second["arity"]
+    kinds = (first.get("arguments", []), second.get("arguments", []))
+
+    if same_arity and kinds[0] == kinds[1]:
+        expected = "pass"
+    elif same_arity and not (kinds[0] and kinds[1]):
+        expected = "warn"
+    else:
+        expected = "refuse"
+
+    for a, b in ((first, second), (second, first)):
+        with warnings.catch_warnings(record=True) as record:
+            warnings.simplefilter("always")
+            try:
+                _compose_two_declarations(a, b)
+            except ComposeError:
+                outcome = "refuse"
+            else:
+                warned = any(issubclass(w.category, ComposeWarning) for w in record)
+                outcome = "warn" if warned else "pass"
+        assert outcome == expected, (a, b)
 
 
 # --- through the engine ---------------------------------------------------------
