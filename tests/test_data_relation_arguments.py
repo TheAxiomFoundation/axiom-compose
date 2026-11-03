@@ -645,6 +645,7 @@ def test_property_namesake_outcome_is_a_function_of_the_declaration_set(seed):
     #   and names the untyped declaration's module;
     # - the rule left in scope is typed iff any declaration is typed;
     # - the composed imports follow the scope order.
+    # - every import order gives the same refusal text or warning list.
     from axiom_compose.core import _rules_in_scope
 
     shapes = _declaration_set(seed)
