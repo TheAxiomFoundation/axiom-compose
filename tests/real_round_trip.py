@@ -23,21 +23,32 @@ from typing import Any
 import pytest
 import yaml
 
-# Known corpus/engine mismatches that block a compile today. Each maps an
-# engine stderr fragment to the reason the test cites when it xfails, so a
-# fixed corpus turns the xfail into a real run and an unrelated failure still
-# fails loudly.
-KNOWN_COMPILE_BLOCKERS = {
-    "declares removed plural `corpus_citation_paths`": (
-        "a module in the closure uses the plural `corpus_citation_paths` "
-        "key that the engine removed; rulespec-us lists it in "
-        "tools/known-engine-load-failures.txt"
+# Known corpus/engine mismatches that block a compile today. Each entry maps
+# engine stderr fragments, all of which must appear, to the reason the test
+# cites when it xfails. A fixed corpus turns the xfail into a real run, and
+# any other failure, including the same error from another module, fails.
+KNOWN_COMPILE_BLOCKERS = (
+    (
+        (
+            # The engine names the module by its id (`us:...`), not its path.
+            "RuleSpec module `us:policies/irs/rev-proc-2025-32/earned-income-credit`",
+            "declares removed plural `corpus_citation_paths`",
+        ),
+        "us:policies/irs/rev-proc-2025-32/earned-income-credit uses the "
+        "plural `corpus_citation_paths` key that the engine removed "
+        "(rulespec-us#1312); rulespec-us lists it in "
+        "tools/known-engine-load-failures.txt",
     ),
-    "non-canonical path component": (
-        "rulespec-us checkout fails engine main's canonical-path root scan "
-        "(rulespec-us#1049)"
-    ),
-}
+)
+
+
+def known_blocker(stderr: str) -> str | None:
+    """The reason for a known compile blocker in ``stderr``, if any."""
+
+    for fragments, reason in KNOWN_COMPILE_BLOCKERS:
+        if all(fragment in stderr for fragment in fragments):
+            return reason
+    return None
 
 
 def external_path(env_var: str) -> Path:
@@ -82,9 +93,9 @@ def compile_or_xfail(
         str(output),
     )
     if completed.returncode:
-        for fragment, reason in KNOWN_COMPILE_BLOCKERS.items():
-            if fragment in completed.stderr:
-                pytest.xfail(f"{command}: {reason}")
+        reason = known_blocker(completed.stderr)
+        if reason is not None:
+            pytest.xfail(f"{command}: {reason}")
         raise AssertionError(f"{command} failed:\n{completed.stderr[-2000:]}")
     return json.loads(output.read_text())
 

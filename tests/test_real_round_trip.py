@@ -13,31 +13,39 @@ fixture population through it. It compares two ways:
 The population is every `.test.yaml` case that supplies inputs; cases with
 no inputs (parameter-only checks) have no entity to query and are left out.
 
-OASDI runs today. EITC and CTC both close over
-`us/policies/irs/rev-proc-2025-32/earned-income-credit`, which the engine
-refuses to load (plural `corpus_citation_paths`); they xfail on exactly that
-message and become real runs once rulespec-us fixes the module.
+OASDI runs today. EITC and CTC check nothing yet: both close over
+`us:policies/irs/rev-proc-2025-32/earned-income-credit`, which the engine
+refuses to load (plural `corpus_citation_paths`, rulespec-us#1312). They
+xfail only on that error naming that module, and become real runs once
+rulespec-us fixes it.
+
+No program here exercises a composer-generated rule yet: the OASDI, EITC
+and CTC specs have no `transformations`, so each composition is an import
+list and "composed == atomic" can only catch closure or import bugs. A
+pattern-synthesis bug (`any_related`, `derived_relation`, ...) would not
+reach this test.
 
 Requires AXIOM_RULESPEC_US_ROOT and AXIOM_RULES_ENGINE_ROOT; skipped
 otherwise.
 """
 
-import functools
 from pathlib import Path
 
 import pytest
+from real_corpus import corpus
 from real_round_trip import (
     Catalog,
     build_request,
     compile_or_xfail,
     external_path,
+    known_blocker,
     load_cases,
     numeric_equal,
     outcomes,
     run_compiled,
 )
 
-from axiom_compose import compose, load_corpus_from_roots, load_spec
+from axiom_compose import compose, load_spec
 
 FIXTURES = Path(__file__).parent / "fixtures"
 
@@ -49,9 +57,40 @@ PROGRAMS = {
 }
 
 
-@functools.cache
-def _corpus(root: Path):
-    return load_corpus_from_roots([root], corpus_sha="rulespec-us@checkout")
+EITC_MODULE = "us:policies/irs/rev-proc-2025-32/earned-income-credit"
+
+
+def _plural_error(module: str) -> str:
+    # The message axiom-rules-engine prints for this load failure.
+    return (
+        "failed to load RuleSpec module `/tmp/composed.yaml`: RuleSpec module "
+        f"`{module}` declares removed plural `corpus_citation_paths`; every "
+        "source/proof node must declare exactly one singular "
+        "`corpus_citation_path`"
+    )
+
+
+def test_known_blocker_matches_the_eitc_module_error():
+    assert known_blocker(_plural_error(EITC_MODULE)) is not None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "",
+        # The same error from any other module still fails.
+        _plural_error("us:statutes/26/3101/a"),
+        _plural_error("us:policies/irs/rev-proc-2025-32/child-tax-credit"),
+        # The module named next to some other error still fails.
+        f"RuleSpec module `{EITC_MODULE}` declares non-canonical "
+        "corpus_citation_path `x`",
+        f"failed to parse formula `1 + * )` in `{EITC_MODULE}`",
+        # A formula syntax error with no module error fails.
+        "expected expression, found `*` at 1:5",
+    ],
+)
+def test_known_blocker_rejects_anything_else(stderr):
+    assert known_blocker(stderr) is None
 
 
 @pytest.mark.parametrize("program", sorted(PROGRAMS))
@@ -64,7 +103,9 @@ def test_composed_program_matches_atomic_module_on_fixture_population(
 
     composed_path = tmp_path / "composed.yaml"
     composed_path.write_bytes(
-        compose(load_spec(spec_path), _corpus(rulespec_us)).source
+        compose(
+            load_spec(spec_path), corpus(rulespec_us, "rulespec-us@checkout")
+        ).source
     )
     composed_artifact = tmp_path / "composed.compiled.json"
     artifact = compile_or_xfail(

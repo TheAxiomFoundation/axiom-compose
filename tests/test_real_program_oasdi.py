@@ -89,11 +89,6 @@ def _run_axiom_oasdi_case(tmp_path: Path) -> float:
         capture_output=True,
         text=True,
     )
-    if completed.returncode and "non-canonical path component" in completed.stderr:
-        pytest.xfail(
-            "rulespec-us checkout fails engine main's canonical-path root "
-            "scan (rulespec-us#1049: colon/space/en-dash filenames)"
-        )
     if completed.returncode and "root-level `programs/`" in completed.stderr:
         pytest.xfail(
             "rulespec-us checkout keeps programs/ at the root, which engine "

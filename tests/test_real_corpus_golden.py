@@ -14,21 +14,27 @@ Two checks per case:
   (``AXIOM_COMPOSE_REGENERATE_GOLDENS=1 pytest -s`` prints them) in the same
   change.
 
-The pinned tree comes from the checkout at ``AXIOM_RULESPEC_US_ROOT``; when
-that checkout lacks the commit (CI checks out depth 1), the test fetches just
-that commit from the checkout's origin. Without the env var, or if the fetch
-fails, the tests skip.
+The pinned tree comes from the checkout at ``AXIOM_RULESPEC_US_ROOT`` when it
+has the commit. When it lacks it (CI checks out depth 1), the commit is
+fetched at depth 1 from the checkout's origin URL into a throwaway bare
+repository, never into the checkout (``tests/pinned_tree.py``). Without the
+env var, or if the fetch fails, the pinned tests skip.
 """
 
-import functools
 import os
 import subprocess
-import tarfile
 from pathlib import Path
 
 import pytest
+from pinned_tree import (
+    PinUnavailable,
+    extract_pinned_tree,
+    git,
+    repository_state,
+)
+from real_corpus import corpus
 
-from axiom_compose import compose, load_corpus_from_roots, load_spec
+from axiom_compose import compose, load_spec
 
 ROOT = Path(__file__).parent
 
@@ -95,66 +101,23 @@ def _checkout() -> Path:
     return path
 
 
-def _git(checkout: Path, *args: str, **kwargs) -> subprocess.CompletedProcess:
-    return subprocess.run(
-        ["git", "-C", str(checkout), *args],
-        check=False,
-        capture_output=True,
-        **kwargs,
-    )
-
-
 @pytest.fixture(scope="module")
 def pinned_root(tmp_path_factory) -> Path:
     """rulespec-us at the pinned commit, extracted outside the checkout."""
 
     checkout = _checkout()
-    if _git(
-        checkout, "cat-file", "-e", f"{PINNED_RULESPEC_US_SHA}^{{commit}}"
-    ).returncode:
-        fetched = _git(
-            checkout,
-            "fetch",
-            "--quiet",
-            "--depth",
-            "1",
-            "origin",
-            PINNED_RULESPEC_US_SHA,
+    try:
+        return extract_pinned_tree(
+            checkout, PINNED_RULESPEC_US_SHA, tmp_path_factory.mktemp("pinned")
         )
-        if fetched.returncode:
-            pytest.skip(
-                f"cannot fetch rulespec-us {PINNED_RULESPEC_US_SHA}: "
-                + fetched.stderr.decode(errors="replace")[-500:]
-            )
-    # The directory name matters: the loader reads the country from
-    # `rulespec-<country>`.
-    root = tmp_path_factory.mktemp("pinned") / "rulespec-us"
-    root.mkdir()
-    archive = root.parent / "tree.tar"
-    with archive.open("wb") as handle:
-        archived = subprocess.run(
-            ["git", "-C", str(checkout), "archive", PINNED_RULESPEC_US_SHA],
-            stdout=handle,
-            stderr=subprocess.PIPE,
-            check=False,
-        )
-    assert archived.returncode == 0, archived.stderr.decode(errors="replace")
-    with tarfile.open(archive) as tar:
-        tar.extractall(root, filter="data")
-    archive.unlink()
-    return root
-
-
-@functools.cache
-def _corpus(root: Path):
-    # Loading rulespec-us takes about a minute; load each root once.
-    return load_corpus_from_roots(
-        [root], corpus_sha=f"rulespec-us@{PINNED_RULESPEC_US_SHA}"
-    )
+    except PinUnavailable as error:
+        pytest.skip(f"cannot get rulespec-us {PINNED_RULESPEC_US_SHA}: {error}")
 
 
 def _compose_text(spec_path: Path, root: Path) -> str:
-    return compose(load_spec(spec_path), _corpus(root)).text()
+    # Both runs carry the pinned label, so only content compose reads differs.
+    labelled = corpus(root, f"rulespec-us@{PINNED_RULESPEC_US_SHA}")
+    return compose(load_spec(spec_path), labelled).text()
 
 
 def _check(name: str, text: str, message: str) -> None:
@@ -186,3 +149,76 @@ def test_current_corpus_still_composes_to_golden(name):
         "content changed the composition. Re-pin the SHA and regenerate the "
         "goldens if the change is intended.",
     )
+
+
+# --- the pinned fixture never writes to the checkout ----------------------------
+
+
+def _run(*args: str, cwd: Path) -> str:
+    completed = subprocess.run(
+        list(args), cwd=cwd, check=True, capture_output=True, text=True
+    )
+    return completed.stdout.strip()
+
+
+def _commit(repo: Path, name: str, text: str) -> str:
+    (repo / name).write_text(text)
+    _run("git", "add", name, cwd=repo)
+    _run(
+        "git",
+        "-c",
+        "user.name=test",
+        "-c",
+        "user.email=test@example.invalid",
+        "commit",
+        "--quiet",
+        "-m",
+        name,
+        cwd=repo,
+    )
+    return _run("git", "rev-parse", "HEAD", cwd=repo)
+
+
+@pytest.mark.parametrize("pin_in_checkout", [False, True])
+def test_pinned_tree_leaves_a_full_checkout_unchanged(tmp_path, pin_in_checkout):
+    # A full (non-shallow) clone that lacks the pin is the case that a
+    # `fetch --depth 1` into the checkout turned shallow. Hermetic: the
+    # "origin" is a local repository served over file://.
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _run("git", "init", "--quiet", cwd=upstream)
+    _run("git", "config", "uploadpack.allowAnySHA1InWant", "true", cwd=upstream)
+    _commit(upstream, "a.yaml", "first\n")
+    _commit(upstream, "b.yaml", "second\n")
+    checkout = tmp_path / "checkout"
+    _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
+    pin = _commit(upstream, "c.yaml", "pinned\n")
+    if pin_in_checkout:
+        _run("git", "fetch", "--quiet", "origin", cwd=checkout)
+    before = repository_state(checkout)
+    assert before["is_shallow"] == "false" and before["shallow_file"] is None
+    assert (git(checkout, "cat-file", "-e", pin).returncode == 0) is pin_in_checkout
+    history = _run("git", "rev-list", "--count", "--all", cwd=checkout)
+
+    root = extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
+    assert (root / "c.yaml").read_text() == "pinned\n"
+    assert repository_state(checkout) == before
+    assert _run("git", "rev-list", "--count", "--all", cwd=checkout) == history
+    assert (git(checkout, "cat-file", "-e", pin).returncode == 0) is pin_in_checkout
+
+
+def test_pinned_tree_reports_an_unfetchable_pin(tmp_path):
+    upstream = tmp_path / "upstream"
+    upstream.mkdir()
+    _run("git", "init", "--quiet", cwd=upstream)
+    _commit(upstream, "a.yaml", "first\n")
+    checkout = tmp_path / "checkout"
+    _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
+    before = repository_state(checkout)
+
+    with pytest.raises(PinUnavailable):
+        extract_pinned_tree(checkout, "0" * 40, tmp_path / "work")
+
+    assert repository_state(checkout) == before
