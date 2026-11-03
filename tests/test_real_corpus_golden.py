@@ -201,22 +201,31 @@ def _upstream(tmp_path: Path, *, allow_filter: bool = False) -> Path:
 
 
 @pytest.mark.parametrize("pin_in_checkout", [False, True])
-def test_pinned_tree_leaves_a_full_checkout_unchanged(tmp_path, pin_in_checkout):
+def test_pinned_tree_leaves_a_full_checkout_unchanged(
+    tmp_path, monkeypatch, pin_in_checkout
+):
     # A full (non-shallow) clone that lacks the pin is the case that a
     # `fetch --depth 1` into the checkout turned shallow. Hermetic: the
-    # "origin" is a local repository served over file://.
+    # "origin" is a local repository served over file://. A healthy checkout
+    # that holds the pin archives from itself alone, with no fetch, so it
+    # works with its origin unreachable.
     upstream = _upstream(tmp_path)
     checkout = tmp_path / "checkout"
     _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
     pin = _commit(upstream, "c.yaml", "pinned\n")
     if pin_in_checkout:
         _run("git", "fetch", "--quiet", "origin", cwd=checkout)
+        missing = str(tmp_path / "missing")
+        _run("git", "remote", "set-url", "origin", missing, cwd=checkout)
     assert (git(checkout, "cat-file", "-e", pin).returncode == 0) is pin_in_checkout
+    archived_from = _record_archive_sources(monkeypatch)
     before = git_dir_snapshot(checkout)
 
     root = extract_pinned_tree(checkout, pin, tmp_path / "work")
 
     assert git_dir_snapshot(checkout) == before
+    expected = checkout if pin_in_checkout else tmp_path / "work" / "scratch.git"
+    assert archived_from == [expected]
     assert sorted(p.name for p in root.iterdir()) == ["a.yaml", "b.yaml", "c.yaml"]
     assert (root / "c.yaml").read_text() == "pinned\n"
     assert not (checkout / ".git" / "shallow").exists()
@@ -372,8 +381,26 @@ def test_pinned_tree_reports_both_failures_when_the_fallback_fails(tmp_path):
     with pytest.raises(AssertionError, match="failed in the checkout") as error:
         extract_pinned_tree(checkout, pin, tmp_path / "work")
 
-    assert "scratch fetch failed" in str(error.value)
+    message = str(error.value)
+    assert "scratch fetch failed" in message
+    # The checkout's own git error, and the fetch error naming the origin.
+    assert "cannot read" in message
+    assert f"from {tmp_path / 'missing'}" in message
     assert git_dir_snapshot(checkout) == before
+
+
+def test_pinned_tree_reports_a_failed_scratch_archive(tmp_path, monkeypatch):
+    # The fetch into scratch succeeds but its `archive` fails: that must
+    # raise git's error, not go on to read a missing or empty tarball.
+    upstream = _upstream(tmp_path)
+    checkout = tmp_path / "checkout"
+    _run("git", "clone", "--quiet", upstream.as_uri(), str(checkout), cwd=tmp_path)
+    pin = _commit(upstream, "c.yaml", "pinned\n")
+    failed = subprocess.CompletedProcess([], 128, b"", b"fatal: scratch archive broke")
+    monkeypatch.setattr(pinned_tree, "_archive", lambda source, sha, path: failed)
+
+    with pytest.raises(AssertionError, match="scratch archive broke"):
+        extract_pinned_tree(checkout, pin, tmp_path / "work")
 
 
 @pytest.mark.parametrize(
