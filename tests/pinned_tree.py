@@ -37,15 +37,30 @@ def _has_commit(repo: Path, sha: str) -> bool:
 
 
 def is_partial_clone(repo: Path) -> bool:
-    """True when ``extensions.partialClone`` is set or any remote is a promisor."""
+    """True when git may lazily fetch missing objects into ``repo``.
+
+    Detects, through ``git config`` reads only:
+
+    - ``extensions.partialClone`` set to any value;
+    - any ``remote.<name>.promisor`` that git reads as true, including a
+      bare key and nonzero numbers (``--type=bool`` normalises them);
+    - any ``remote.<name>.partialclonefilter``.
+
+    A ``promisor`` value git cannot read as a boolean also counts, so an
+    unreadable config takes the scratch path rather than the checkout.
+    """
 
     if git(repo, "config", "--get", "extensions.partialClone").stdout.strip():
         return True
-    promisors = git(repo, "config", "--get-regexp", r"^remote\..*\.promisor$")
-    return any(
-        line.split(None, 1)[-1].strip().lower() in {"true", "yes", "on", "1"}
-        for line in promisors.stdout.splitlines()
+    promisors = git(
+        repo, "config", "--type=bool", "--get-regexp", r"^remote\..*\.promisor$"
     )
+    if promisors.returncode not in (0, 1):
+        return True
+    if any(line.endswith(" true") for line in promisors.stdout.splitlines()):
+        return True
+    filters = git(repo, "config", "--get-regexp", r"^remote\..*\.partialclonefilter$")
+    return filters.returncode == 0 and bool(filters.stdout.strip())
 
 
 # URL forms git does not read as a local path: `scheme://...` and the
@@ -129,7 +144,7 @@ def git_dir_snapshot(repo: Path) -> dict[str, tuple[str, int]]:
     """
 
     git_dir = repo / ".git"
-    return {
+    snapshot = {
         str(path.relative_to(git_dir)): (
             hashlib.sha256(path.read_bytes()).hexdigest(),
             path.stat().st_mtime_ns,
@@ -137,3 +152,7 @@ def git_dir_snapshot(repo: Path) -> dict[str, tuple[str, int]]:
         for path in sorted(git_dir.rglob("*"))
         if path.is_file()
     }
+    # A worktree's `.git` is a file, which would give an empty snapshot that
+    # compares equal whatever happens.
+    assert snapshot, f"{git_dir} holds no files; is it a worktree's .git file?"
+    return snapshot

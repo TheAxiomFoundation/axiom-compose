@@ -25,10 +25,12 @@ import os
 import subprocess
 from pathlib import Path
 
+import pinned_tree
 import pytest
 from pinned_tree import (
     PinUnavailable,
     extract_pinned_tree,
+    fetch_source,
     git,
     git_dir_snapshot,
     is_partial_clone,
@@ -220,9 +222,7 @@ def test_pinned_tree_leaves_a_full_checkout_unchanged(tmp_path, pin_in_checkout)
     assert not (checkout / ".git" / "shallow").exists()
 
 
-def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
-    # `git archive` in a blobless clone lazily fetches the missing blobs into
-    # the clone's object store, so a partial clone takes the scratch path.
+def _blobless_clone(tmp_path: Path) -> tuple[Path, str]:
     upstream = _upstream(tmp_path, allow_filter=True)
     pin = _commit(upstream, "c.yaml", "pinned\n")
     checkout = tmp_path / "checkout"
@@ -236,6 +236,34 @@ def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
         str(checkout),
         cwd=tmp_path,
     )
+    return checkout, pin
+
+
+def _promisor_shape(checkout: Path, shape: str) -> None:
+    """Leave only one promisor-backed config shape, one git still honours."""
+
+    for key in (
+        "extensions.partialClone",
+        "remote.origin.promisor",
+        "remote.origin.partialclonefilter",
+    ):
+        # A key may be absent (git 2.43's blobless clone sets no
+        # extensions.partialClone), so the exit status is not checked.
+        git(checkout, "config", "--unset", key)
+    config = checkout / ".git" / "config"
+    line = {
+        "partialclonefilter only": "\tpartialclonefilter = blob:none\n",
+        "bare promisor key": "\tpromisor\n",
+        "promisor = 2": "\tpromisor = 2\n",
+    }[shape]
+    header = '[remote "origin"]\n'
+    config.write_text(config.read_text().replace(header, header + line))
+
+
+def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
+    # `git archive` in a blobless clone lazily fetches the missing blobs into
+    # the clone's object store, so a partial clone takes the scratch path.
+    checkout, pin = _blobless_clone(tmp_path)
     assert is_partial_clone(checkout)
     before = git_dir_snapshot(checkout)
 
@@ -247,19 +275,88 @@ def test_pinned_tree_leaves_a_blobless_partial_clone_unchanged(tmp_path):
 
 
 @pytest.mark.parametrize(
-    ("config", "partial"),
+    "shape", ["partialclonefilter only", "bare promisor key", "promisor = 2"]
+)
+def test_pinned_tree_detects_other_promisor_shapes(tmp_path, shape):
+    # Git treats each of these as promisor-backed. Each must be detected, so
+    # the tree extracts through scratch rather than failing at `archive`.
+    checkout, pin = _blobless_clone(tmp_path)
+    _promisor_shape(checkout, shape)
+    assert git(checkout, "config", "--get", "extensions.partialClone").stdout == ""
+    assert is_partial_clone(checkout)
+    before = git_dir_snapshot(checkout)
+
+    root = extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    assert git_dir_snapshot(checkout) == before
+    assert (root / "c.yaml").read_text() == "pinned\n"
+
+
+def test_lazy_fetch_guard_alone_keeps_a_partial_clone_unchanged(tmp_path, monkeypatch):
+    # With detection bypassed, the tree is archived from the blobless
+    # checkout itself, and only GIT_NO_LAZY_FETCH stops git from fetching the
+    # missing blobs into it. `archive` then fails; the checkout is untouched.
+    checkout, pin = _blobless_clone(tmp_path)
+    monkeypatch.setattr(pinned_tree, "is_partial_clone", lambda repo: False)
+    before = git_dir_snapshot(checkout)
+
+    with pytest.raises(AssertionError, match="promisor remote"):
+        extract_pinned_tree(checkout, pin, tmp_path / "work")
+
+    assert git_dir_snapshot(checkout) == before
+
+
+@pytest.mark.parametrize(
+    ("lines", "partial"),
     [
-        ({}, False),
-        ({"extensions.partialClone": "origin"}, True),
-        ({"remote.mirror.promisor": "true"}, True),
-        ({"remote.mirror.promisor": "false"}, False),
+        ([], False),
+        (["[extensions]", "\tpartialClone = origin"], True),
+        (['[remote "mirror"]', "\tpromisor = true"], True),
+        (['[remote "mirror"]', "\tpromisor = Yes"], True),
+        (['[remote "mirror"]', "\tpromisor"], True),
+        (['[remote "mirror"]', "\tpromisor = 2"], True),
+        (['[remote "mirror"]', "\tpromisor = false"], False),
+        (['[remote "mirror"]', "\tpromisor = 0"], False),
+        (['[remote "mirror"]', "\tpromisor = maybe"], True),
+        (['[remote "mirror"]', "\tpartialclonefilter = blob:none"], True),
+        (['[remote "mirror"]', "\turl = ../up"], False),
     ],
 )
-def test_partial_clone_detection(tmp_path, config, partial):
+def test_partial_clone_detection(tmp_path, lines, partial):
     _run("git", "init", "--quiet", cwd=tmp_path)
-    for key, value in config.items():
-        _run("git", "config", key, value, cwd=tmp_path)
+    config = tmp_path / ".git" / "config"
+    config.write_text(config.read_text() + "".join(f"{line}\n" for line in lines))
     assert is_partial_clone(tmp_path) is partial
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "git@github.com:o/r.git",
+        "github.com:o/r",
+        "https://github.com/o/r.git",
+        "ssh://host/~/r",
+        "file:///srv/up",
+        "/srv/up",
+        "--upload-pack=x",
+    ],
+)
+def test_fetch_source_passes_urls_scp_forms_and_absolute_paths_through(tmp_path, url):
+    assert fetch_source(tmp_path, url) == url
+
+
+@pytest.mark.parametrize("url", ["../up", "up", "./up", "a/b:c"])
+def test_fetch_source_resolves_relative_local_paths_against_the_checkout(tmp_path, url):
+    assert fetch_source(tmp_path / "checkout", url) == str(
+        (tmp_path / "checkout" / url).resolve()
+    )
+
+
+def test_git_dir_snapshot_refuses_a_git_file(tmp_path):
+    # A worktree's `.git` is a file; an empty snapshot would compare equal.
+    (tmp_path / ".git").write_text("gitdir: /elsewhere\n")
+    with pytest.raises(AssertionError, match="holds no files"):
+        git_dir_snapshot(tmp_path)
 
 
 def test_pinned_tree_resolves_a_relative_origin_against_the_checkout(tmp_path):
