@@ -144,16 +144,26 @@ def _rules_in_scope(
     imports: tuple[str, ...],
     corpus_state: CorpusState,
     synthesized_rules: list[Mapping[str, Any]],
+    *,
+    check_namesakes: bool = True,
 ) -> dict[str, Mapping[str, Any]]:
     """Unified rule map: atomic rules from imported modules plus synthesized
     transformation rules. Both sides expose `versions`-with-formulas the
     coverage analyzer understands. Synthesized rules win over corpus rules
-    of the same name — they're the program-level override."""
+    of the same name — they're the program-level override.
+
+    ``check_namesakes`` runs ``_check_data_relation_namesakes``. ``compose``
+    builds the scope twice when it auto-gates outputs, and only its own call
+    checks, so each warning is issued once per ``compose``.
+    """
 
     rules_by_name: dict[str, Mapping[str, Any]] = {}
     defined_in: dict[str, str] = {}
-    # name -> {module target: data_relation rule}, for the namesake check.
-    relation_declarations: dict[str, dict[str, Mapping[str, Any]]] = defaultdict(dict)
+    # name -> every (module target, data_relation rule) in import order, a
+    # module's repeated declarations included, for the namesake check.
+    relation_declarations: dict[str, list[tuple[str, Mapping[str, Any]]]] = defaultdict(
+        list
+    )
     for target in imports:
         module = corpus_state.modules.get(target)
         if module is None:
@@ -183,7 +193,7 @@ def _rules_in_scope(
                         f"{previous} and {target}"
                     )
             if is_relation:
-                relation_declarations[name][target] = rule
+                relation_declarations[name].append((target, rule))
                 # An untyped declaration never replaces a typed namesake, so
                 # the rule in scope carries the slot kinds when any
                 # declaration has them.
@@ -196,9 +206,10 @@ def _rules_in_scope(
                     continue
             rules_by_name[name] = rule
             defined_in[name] = target
-    for name in sorted(relation_declarations):
-        if len(relation_declarations[name]) > 1:
-            _check_data_relation_namesakes(name, relation_declarations[name])
+    if check_namesakes:
+        for name in sorted(relation_declarations):
+            if len(relation_declarations[name]) > 1:
+                _check_data_relation_namesakes(name, relation_declarations[name])
     for rule in synthesized_rules:
         name = rule.get("name") if isinstance(rule, Mapping) else None
         if isinstance(name, str) and name:
@@ -230,7 +241,7 @@ def _data_relation_shape(
 
 
 def _check_data_relation_namesakes(
-    name: str, declarations: Mapping[str, Mapping[str, Any]]
+    name: str, declarations: list[tuple[str, Mapping[str, Any]]]
 ) -> None:
     """Check every imported data_relation that shares a short name.
 
@@ -250,7 +261,9 @@ def _check_data_relation_namesakes(
     - refuse when any two declarations differ in arity, or both declare
       non-empty ``arguments`` that differ;
     - otherwise, warn once for each untyped declaration that has a typed
-      namesake. The corpus has such pairs today
+      namesake (``compose`` runs this check once, so once per ``compose``;
+      a module that declares the name twice contributes both
+      declarations). The corpus has such pairs today
       (``us:statutes/7/2012/j#member_of_household`` is untyped while state
       modules and ``us:policies/usda/snap/state-plan-composition`` declare
       ``[Person, Household]``), and refusing them would block seven SNAP
@@ -259,35 +272,42 @@ def _check_data_relation_namesakes(
       rulespec-us types ``us:statutes/7/2012/j#member_of_household``, as
       axiom-compose#36 tracks.
 
-    Declarations are visited in module-target order, so the refused pair
-    and the warning text are the same for every import order.
+    Declarations are visited in (module target, position in import order)
+    order, so the refused pair and the warning text are the same for every
+    import order. A warning cites the first typed declaration in that order.
     """
 
-    shapes = {
-        target: _data_relation_shape(rule) for target, rule in declarations.items()
-    }
-    targets = sorted(shapes)
-    for index, first in enumerate(targets):
-        for second in targets[index + 1 :]:
+    ordered = sorted(
+        (
+            (target, position, _data_relation_shape(rule))
+            for position, (target, rule) in enumerate(declarations)
+        ),
+        key=lambda item: (item[0], item[1]),
+    )
+    for index, (first, _, first_shape) in enumerate(ordered):
+        for second, _, second_shape in ordered[index + 1 :]:
             (first_arity, first_kinds), (second_arity, second_kinds) = (
-                shapes[first],
-                shapes[second],
+                first_shape,
+                second_shape,
             )
             if first_arity != second_arity or (
                 first_kinds and second_kinds and first_kinds != second_kinds
             ):
                 raise ComposeError(
-                    _namesake_detail(name, first, shapes[first], second, shapes[second])
+                    _namesake_detail(name, first, first_shape, second, second_shape)
                 )
-    typed = [target for target in targets if shapes[target][1]]
+    typed = [(target, shape) for target, _, shape in ordered if shape[1]]
     if not typed:
         return
-    for target in targets:
-        if shapes[target][1]:
+    typed_target, typed_shape = typed[0]
+    for target, _, shape in ordered:
+        if shape[1]:
             continue
-        first, second = sorted((target, typed[0]))
+        (first, first_shape), (second, second_shape) = sorted(
+            ((target, shape), (typed_target, typed_shape)), key=lambda item: item[0]
+        )
         warnings.warn(
-            _namesake_detail(name, first, shapes[first], second, shapes[second])
+            _namesake_detail(name, first, first_shape, second, second_shape)
             + f"; type the declaration in {target} with the same `arguments`",
             ComposeWarning,
             stacklevel=3,
@@ -1179,7 +1199,8 @@ def _apply_auto_gate_outputs(
     if not spec.auto_gate_outputs:
         return rules, frozenset()
 
-    rules_by_name = _rules_in_scope(imports, corpus_state, rules)
+    # compose checks namesakes on its own scope call, after this one.
+    rules_by_name = _rules_in_scope(imports, corpus_state, rules, check_namesakes=False)
 
     new_rules: list[Mapping[str, Any]] = []
     processed: set[str] = set()

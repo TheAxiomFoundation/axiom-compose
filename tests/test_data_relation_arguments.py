@@ -216,7 +216,10 @@ def test_compose_accepts_untyped_relation_no_composed_rule_aggregates():
 # --- duplicate declarations across imported modules ----------------------------
 
 
-def _relation_module(target: str, data_relation: dict) -> RuleSpecModule:
+def _relation_module(target: str, data_relation: dict | list) -> RuleSpecModule:
+    """A module declaring member_of_household once per entry, in order."""
+
+    declared = data_relation if isinstance(data_relation, list) else [data_relation]
     return RuleSpecModule(
         target=target,
         payload={
@@ -225,8 +228,9 @@ def _relation_module(target: str, data_relation: dict) -> RuleSpecModule:
                 {
                     "name": "member_of_household",
                     "kind": "data_relation",
-                    "data_relation": data_relation,
+                    "data_relation": body,
                 }
+                for body in declared
             ],
         },
     )
@@ -370,8 +374,11 @@ def test_property_namesake_relations_refuse_warn_or_pass(seed):
         assert outcome == expected, (a, b)
 
 
-def _compose_declarations(shapes: dict[str, dict], order: list[str]):
-    """Compose one module per short name in ``shapes``, scoped in ``order``."""
+def _compose_declarations(shapes: dict[str, dict | list], order: list[str]):
+    """Compose one module per short name in ``shapes``, scoped in ``order``.
+
+    A list value declares the relation once per entry in that module.
+    """
 
     modules = {
         f"us:{short}": _relation_module(f"us:{short}", shape)
@@ -388,7 +395,7 @@ def _compose_declarations(shapes: dict[str, dict], order: list[str]):
     return compose(spec, CorpusState(modules=modules))
 
 
-def _outcome(shapes: dict[str, dict], order: list[str]):
+def _outcome(shapes: dict[str, dict | list], order: list[str]):
     """("refuse", message) or ("compose", imports, warning messages)."""
 
     with warnings.catch_warnings(record=True) as record:
@@ -438,69 +445,261 @@ def test_untyped_namesake_never_replaces_a_typed_one_in_scope():
         assert scope["member_of_household"]["data_relation"] == typed
 
 
-NAMESAKE_SHAPES = (
-    {"arity": 2, "arguments": ["Person", "Household"]},
-    {"arity": 2, "arguments": ["Household", "Person"]},
-    {"arity": 2},
-    {"arity": 3},
-    {"arity": 3, "arguments": ["Person", "Household", "TaxUnit"]},
-)
-
-
-COMPATIBLE_SHAPES = (
-    (NAMESAKE_SHAPES[0], NAMESAKE_SHAPES[2]),
-    (NAMESAKE_SHAPES[3], NAMESAKE_SHAPES[4]),
-)
-
-
-def _refuses_as_pair(first: dict, second: dict) -> bool:
-    first_kinds = first.get("arguments", [])
-    second_kinds = second.get("arguments", [])
-    return first["arity"] != second["arity"] or (
-        bool(first_kinds and second_kinds) and first_kinds != second_kinds
+@pytest.mark.parametrize("order", [["a", "b"], ["b", "a"]])
+def test_a_module_that_declares_a_relation_twice_contributes_both(order):
+    # us:a's typed declaration conflicts with us:b's. Keyed by module, the
+    # later arity-only declaration in us:a hid it, and the rule left in
+    # scope depended on import order.
+    shapes = {
+        "a": [{"arity": 2, "arguments": ["Person", "Household"]}, {"arity": 2}],
+        "b": {"arity": 2, "arguments": ["Household", "Person"]},
+    }
+    assert _outcome(shapes, order) == (
+        "refuse",
+        "data relation 'member_of_household' is declared differently by two "
+        "imported modules: us:a declares arity 2 with arguments [Person, "
+        "Household] and us:b declares arity 2 with arguments [Household, Person]",
     )
 
 
-@pytest.mark.parametrize("seed", range(150))
-def test_property_namesake_outcome_is_a_function_of_the_declaration_set(seed):
-    # For three or four same-named declarations, composed in every import
-    # order:
-    # - refuse iff some pair of declarations refuses as a pair;
-    # - otherwise compose, with exactly one ComposeWarning per untyped
-    #   declaration when any declaration is typed, and none otherwise;
-    # - the refusal message, or the set of warning messages, is the same for
-    #   every order, and the composed imports follow the scope order.
+@pytest.mark.parametrize("order", list(itertools.permutations("abc")))
+def test_a_warning_cites_the_first_typed_declaration_in_target_order(order):
+    typed = {"arity": 2, "arguments": ["Person", "Household"]}
+    shapes = {"a": typed, "b": {"arity": 2}, "c": dict(typed)}
+
+    assert _outcome(shapes, list(order))[2] == [
+        "data relation 'member_of_household' is declared differently by two "
+        "imported modules: us:a declares arity 2 with arguments [Person, "
+        "Household] and us:b declares arity 2 with no arguments; type the "
+        "declaration in us:b with the same `arguments`"
+    ]
+
+
+def _auto_gated(first: dict, second: dict, *, auto_gate: bool):
+    from axiom_compose.spec import TransformationSpec
+
+    spec = ProgramSpec(
+        program="us/example",
+        period="2026-01",
+        outputs=("widget_eligible",),
+        scope={"federal": ("a", "b")},
+        transformations=(
+            TransformationSpec(
+                pattern="all_of",
+                parameters={
+                    "name": "widget_eligible",
+                    "effective_from": "2026-01-01",
+                    "entity": "Household",
+                    "dtype": "Judgment",
+                    "period": "Month",
+                    "source": "us:a",
+                    "conditions": ["widget_member_eligible"],
+                },
+            ),
+        ),
+        auto_gate_outputs=("widget_eligible",) if auto_gate else (),
+    )
+    module_a = _relation_module("us:a", first)
+    module_a.payload["rules"].append(
+        {
+            "name": "widget_member_eligible",
+            "kind": "derived",
+            "versions": [{"formula": "true"}],
+        }
+    )
+    modules = {"us:a": module_a, "us:b": _relation_module("us:b", second)}
+    return compose(spec, CorpusState(modules=modules))
+
+
+def test_auto_gated_compose_warns_once_per_untyped_declaration():
+    # compose builds the rule scope twice when it auto-gates outputs; each
+    # build used to check namesakes, so each warning was issued twice.
+    with warnings.catch_warnings(record=True) as record:
+        warnings.simplefilter("always")
+        program = _auto_gated(
+            {"arity": 2, "arguments": ["Person", "Household"]},
+            {"arity": 2},
+            auto_gate=True,
+        )
+    warned = [w for w in record if issubclass(w.category, ComposeWarning)]
+    assert len(warned) == 1, [str(w.message) for w in warned]
+    assert "type the declaration in us:b" in str(warned[0].message)
+    assert program.payload["imports"] == ["us:a", "us:b"]
+
+
+def test_auto_gated_compose_refuses_with_the_same_text():
+    first = {"arity": 2, "arguments": ["Person", "Household"]}
+    second = {"arity": 2, "arguments": ["Household", "Person"]}
+    messages = []
+    for auto_gate in (True, False):
+        with pytest.raises(ComposeError, match="declared differently") as error:
+            _auto_gated(first, second, auto_gate=auto_gate)
+        messages.append(str(error.value))
+    assert messages[0] == messages[1]
+
+
+KINDS = ("Person", "Household", "TaxUnit")
+
+
+def _declaration(rng: random.Random, arity: int, kinds: list[str] | None) -> dict:
+    """A data_relation body in one of the forms the corpus uses.
+
+    ``kinds=None`` gives an untyped declaration: ``arguments`` absent or
+    ``[]``. Otherwise ``arguments`` is the compact list or the
+    ``{name, entity}`` object form, which compare equal.
+    """
+
+    if kinds is None:
+        return (
+            {"arity": arity}
+            if rng.random() < 0.5
+            else {"arity": arity, "arguments": []}
+        )
+    if rng.random() < 0.5:
+        return {"arity": arity, "arguments": list(kinds)}
+    return {
+        "arity": arity,
+        "arguments": [
+            {"name": f"slot{index}", "entity": kind} for index, kind in enumerate(kinds)
+        ],
+    }
+
+
+def _normalized(body: dict) -> tuple[int, tuple[str, ...]]:
+    return (
+        body["arity"],
+        tuple(
+            item["entity"] if isinstance(item, dict) else item
+            for item in body.get("arguments") or ()
+        ),
+    )
+
+
+def _declaration_set(seed: int) -> dict[str, list[dict]]:
+    """Two to five declarations over one to five modules (a module may hold
+    several), in one of three modes by ``seed % 3``:
+
+    - 0: any arity 1-3 and any kinds per declaration;
+    - 1: one arity and one kinds list, typed or untyped, so the set never
+      refuses and warn and pass cases are common;
+    - 2: one arity and two kinds lists (the second reversed or redrawn), so
+      typed declarations conflict with an untyped one anywhere in the order.
+
+    Every typed declaration takes the compact or the ``{name, entity}``
+    object form, and every untyped one omits ``arguments`` or gives ``[]``.
+    """
+
     rng = random.Random(seed)
-    count = 3 + seed % 2
-    # Two seeds in three draw from one arity's typed and untyped shape, which
-    # never refuse, so warn and pass cases are common, not just refusals.
-    pool = COMPATIBLE_SHAPES[seed % 2] if seed % 3 else NAMESAKE_SHAPES
-    shapes = {f"m{index}": dict(rng.choice(pool)) for index in range(count)}
-    declared = list(shapes.values())
+    count = rng.randint(2, 5)
+    modules = rng.randint(1, count)
+    owners = list(range(modules)) + [
+        rng.randrange(modules) for _ in range(count - modules)
+    ]
+    rng.shuffle(owners)
+    arity = rng.randint(1, 3)
+    kinds = [rng.choice(KINDS) for _ in range(arity)]
+    shapes: dict[str, list[dict]] = {f"m{index}": [] for index in range(modules)}
+    other = list(reversed(kinds))
+    if other == kinds:
+        other = [rng.choice(KINDS) for _ in range(arity)]
+    for owner in owners:
+        chosen = kinds
+        if seed % 3 == 0:
+            arity = rng.randint(1, 3)
+            chosen = [rng.choice(KINDS) for _ in range(arity)]
+        elif seed % 3 == 2 and rng.random() < 0.5:
+            chosen = other
+        typed = rng.random() < 0.6
+        shapes[f"m{owner}"].append(_declaration(rng, arity, chosen if typed else None))
+    return shapes
+
+
+def _orders(names: list[str], seed: int) -> list[tuple[str, ...]]:
+    # Every order for up to four modules; for five, 24 orders including
+    # sorted and reversed.
+    if len(names) <= 4:
+        return list(itertools.permutations(names))
+    rng = random.Random(seed)
+    sampled = {tuple(names), tuple(reversed(names))}
+    while len(sampled) < 24:
+        sampled.add(tuple(rng.sample(names, len(names))))
+    return sorted(sampled)
+
+
+def _format(shape: tuple[int, tuple[str, ...]]) -> str:
+    arity, kinds = shape
+    typed = f"arguments [{', '.join(kinds)}]" if kinds else "no arguments"
+    return f"arity {arity} with {typed}"
+
+
+@pytest.mark.parametrize("seed", range(300))
+def test_property_namesake_outcome_is_a_function_of_the_declaration_set(seed):
+    # For a set of same-named declarations, composed in every import order
+    # (24 sampled orders for five modules):
+    # - refuse iff some pair of declarations differs in arity or declares
+    #   different non-empty arguments (compact and object form compare
+    #   equal; absent and [] are both untyped);
+    # - otherwise compose, issuing exactly one ComposeWarning per untyped
+    #   declaration when any declaration is typed, and none otherwise; each
+    #   cites the first typed declaration in (module target, position) order
+    #   and names the untyped declaration's module;
+    # - the rule left in scope is typed iff any declaration is typed;
+    # - the composed imports follow the scope order.
+    from axiom_compose.core import _rules_in_scope
+
+    shapes = _declaration_set(seed)
+    declared = [
+        (f"us:{name}", position, _normalized(body))
+        for name, bodies in sorted(shapes.items())
+        for position, body in enumerate(bodies)
+    ]
     refuses = any(
-        _refuses_as_pair(first, second)
+        first[2][0] != second[2][0]
+        or (first[2][1] and second[2][1] and first[2][1] != second[2][1])
         for first, second in itertools.combinations(declared, 2)
     )
-    untyped = sorted(name for name, shape in shapes.items() if "arguments" not in shape)
-    any_typed = len(untyped) < count
+    typed = [item for item in declared if item[2][1]]
+    expected_warnings = []
+    if not refuses and typed:
+        typed_target, _, typed_shape = typed[0]
+        for target, _, shape in declared:
+            if shape[1]:
+                continue
+            pair = sorted(
+                [(target, shape), (typed_target, typed_shape)], key=lambda x: x[0]
+            )
+            expected_warnings.append(
+                "data relation 'member_of_household' is declared differently by "
+                f"two imported modules: {pair[0][0]} declares {_format(pair[0][1])} "
+                f"and {pair[1][0]} declares {_format(pair[1][1])}; type the "
+                f"declaration in {target} with the same `arguments`"
+            )
+    modules = {
+        f"us:{name}": _relation_module(f"us:{name}", bodies)
+        for name, bodies in shapes.items()
+    }
 
     results = set()
-    for order in itertools.permutations(sorted(shapes)):
+    for order in _orders(sorted(shapes), seed):
         result = _outcome(shapes, list(order))
         if refuses:
-            assert result[0] == "refuse", (shapes, order)
+            assert result[0] == "refuse", (shapes, order, result)
             results.add(result)
             continue
         assert result[0] == "compose", (shapes, order, result)
         assert result[1] == [f"us:{name}" for name in order]
-        expected_warned = untyped if any_typed else []
-        assert len(result[2]) == len(expected_warned), (shapes, order, result[2])
-        for name, message in zip(
-            expected_warned,
-            sorted(result[2], key=lambda m: m.rsplit(" in ", 1)[-1]),
-            strict=True,
-        ):
-            assert message.endswith(f"in us:{name} with the same `arguments`")
+        assert result[2] == sorted(expected_warnings), (shapes, order)
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ComposeWarning)
+            scope = _rules_in_scope(
+                tuple(f"us:{name}" for name in order),
+                CorpusState(modules=modules),
+                [],
+            )
+        in_scope = _normalized(scope["member_of_household"]["data_relation"])
+        assert bool(in_scope[1]) is bool(typed), (shapes, order, in_scope)
+        if typed:
+            assert in_scope[1] == typed[0][2][1]
         results.add(("compose", tuple(result[2])))
     assert len(results) == 1, results
 
