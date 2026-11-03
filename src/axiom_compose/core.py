@@ -152,6 +152,8 @@ def _rules_in_scope(
 
     rules_by_name: dict[str, Mapping[str, Any]] = {}
     defined_in: dict[str, str] = {}
+    # name -> {module target: data_relation rule}, for the namesake check.
+    relation_declarations: dict[str, dict[str, Mapping[str, Any]]] = defaultdict(dict)
     for target in imports:
         module = corpus_state.modules.get(target)
         if module is None:
@@ -162,33 +164,41 @@ def _rules_in_scope(
             name = rule.get("name")
             if not isinstance(name, str) or not name:
                 continue
+            is_relation = rule.get("kind") == "data_relation"
             previous = defined_in.get(name)
             if previous is not None and previous != target:
                 # Two imported modules defining the same rule name would
                 # otherwise resolve first-import-wins with no error, unlike
                 # discovery which raises on ambiguity (#26). Data relations
-                # are exempt when both declarations have the same
-                # structure: the corpus declares e.g. member_of_household
-                # in every module that scopes to it. Once relations are
-                # typed, two same-named declarations can disagree on slot
-                # kinds or orientation ([Person, Household] vs
-                # [Household, Person]), which refuses, or one can be
-                # untyped, which warns for now (#33); see
+                # are exempt: the corpus declares e.g. member_of_household
+                # in every module that scopes to it. Their shapes are
+                # checked together after the loop, so the result does not
+                # depend on import order (#33); see
                 # _check_data_relation_namesakes.
-                both_data_relations = (
-                    rule.get("kind") == "data_relation"
-                    and rules_by_name[name].get("kind") == "data_relation"
-                )
-                if not both_data_relations:
+                if not (
+                    is_relation and rules_by_name[name].get("kind") == "data_relation"
+                ):
                     raise ComposeError(
                         f"rule {name!r} is defined by two imported modules: "
                         f"{previous} and {target}"
                     )
-                _check_data_relation_namesakes(
-                    name, previous, rules_by_name[name], target, rule
-                )
+            if is_relation:
+                relation_declarations[name][target] = rule
+                # An untyped declaration never replaces a typed namesake, so
+                # the rule in scope carries the slot kinds when any
+                # declaration has them.
+                stored = rules_by_name.get(name)
+                if (
+                    stored is not None
+                    and _data_relation_shape(stored)[1]
+                    and not _data_relation_shape(rule)[1]
+                ):
+                    continue
             rules_by_name[name] = rule
             defined_in[name] = target
+    for name in sorted(relation_declarations):
+        if len(relation_declarations[name]) > 1:
+            _check_data_relation_namesakes(name, relation_declarations[name])
     for rule in synthesized_rules:
         name = rule.get("name") if isinstance(rule, Mapping) else None
         if isinstance(name, str) and name:
@@ -220,55 +230,82 @@ def _data_relation_shape(
 
 
 def _check_data_relation_namesakes(
-    name: str,
-    previous: str,
-    earlier_rule: Mapping[str, Any],
-    target: str,
-    later_rule: Mapping[str, Any],
+    name: str, declarations: Mapping[str, Mapping[str, Any]]
 ) -> None:
-    """Compare two imported data_relations that share a short name.
+    """Check every imported data_relation that shares a short name.
 
     In axiom-rules-engine an imported relation is named
     ``<module>#relation.<name>``, so namesakes in different modules are
-    separate engine relations. When the engine merges two declarations of
-    one relation it lets an empty slot list take a typed one, and raises
-    ``RelationSlotEntitiesConflict`` only when both lists are non-empty and
-    differ. It refuses ``untyped_relation`` only when a rule executes an
-    aggregation over a relation with no slot kinds, which
-    ``_assert_aggregated_relations_typed`` mirrors for composed rules.
+    separate engine relations, and the engine never merges them. When it
+    merges two declarations of one relation it lets an empty slot list take
+    a typed one, and raises ``RelationSlotEntitiesConflict`` only when both
+    lists are non-empty and differ. It refuses ``untyped_relation`` only
+    when a rule executes an aggregation over a relation with no slot kinds,
+    which ``_assert_aggregated_relations_typed`` mirrors for composed rules.
 
     Compose resolves rules in scope by short name, so it keeps one shape
-    per name:
+    per name. The result depends only on the set of declarations, not on
+    import order:
 
-    - a different arity, or two different non-empty ``arguments`` lists,
-      cannot be one relation and refuses;
-    - a typed declaration beside an untyped one warns. The corpus has such
-      pairs today (``us:statutes/7/2012/j#member_of_household`` is untyped
-      while state modules and ``us:policies/usda/snap/state-plan-composition``
-      declare ``[Person, Household]``), and refusing them would block seven
-      SNAP specs that compose and that the engine does not refuse on this
-      ground. This becomes a refusal once the corpus types
-      ``us:statutes/7/2012/j#member_of_household``.
+    - refuse when any two declarations differ in arity, or both declare
+      non-empty ``arguments`` that differ;
+    - otherwise, warn once for each untyped declaration that has a typed
+      namesake. The corpus has such pairs today
+      (``us:statutes/7/2012/j#member_of_household`` is untyped while state
+      modules and ``us:policies/usda/snap/state-plan-composition`` declare
+      ``[Person, Household]``), and refusing them would block seven SNAP
+      specs that compose and that the engine does not refuse on this
+      ground. A later compose release should refuse this case once
+      rulespec-us types ``us:statutes/7/2012/j#member_of_household``, as
+      axiom-compose#36 tracks.
+
+    Declarations are visited in module-target order, so the refused pair
+    and the warning text are the same for every import order.
     """
 
-    earlier = _data_relation_shape(earlier_rule)
-    later = _data_relation_shape(later_rule)
-    if earlier == later:
+    shapes = {
+        target: _data_relation_shape(rule) for target, rule in declarations.items()
+    }
+    targets = sorted(shapes)
+    for index, first in enumerate(targets):
+        for second in targets[index + 1 :]:
+            (first_arity, first_kinds), (second_arity, second_kinds) = (
+                shapes[first],
+                shapes[second],
+            )
+            if first_arity != second_arity or (
+                first_kinds and second_kinds and first_kinds != second_kinds
+            ):
+                raise ComposeError(
+                    _namesake_detail(name, first, shapes[first], second, shapes[second])
+                )
+    typed = [target for target in targets if shapes[target][1]]
+    if not typed:
         return
-    detail = (
-        f"data relation {name!r} is declared differently by two imported "
-        f"modules: {previous} declares {_format_relation_shape(earlier)} and "
-        f"{target} declares {_format_relation_shape(later)}"
-    )
-    (earlier_arity, earlier_kinds), (later_arity, later_kinds) = earlier, later
-    if earlier_arity == later_arity and not (earlier_kinds and later_kinds):
+    for target in targets:
+        if shapes[target][1]:
+            continue
+        first, second = sorted((target, typed[0]))
         warnings.warn(
-            detail + "; type the untyped declaration with the same `arguments`",
+            _namesake_detail(name, first, shapes[first], second, shapes[second])
+            + f"; type the declaration in {target} with the same `arguments`",
             ComposeWarning,
-            stacklevel=2,
+            stacklevel=3,
         )
-        return
-    raise ComposeError(detail)
+
+
+def _namesake_detail(
+    name: str,
+    first: str,
+    first_shape: tuple[Any, tuple[str, ...]],
+    second: str,
+    second_shape: tuple[Any, tuple[str, ...]],
+) -> str:
+    return (
+        f"data relation {name!r} is declared differently by two imported "
+        f"modules: {first} declares {_format_relation_shape(first_shape)} and "
+        f"{second} declares {_format_relation_shape(second_shape)}"
+    )
 
 
 def _format_relation_shape(shape: tuple[Any, tuple[str, ...]]) -> str:

@@ -8,6 +8,7 @@ check across imported modules, and a hermetic compile-and-run through the
 engine (skipped without AXIOM_RULES_ENGINE_ROOT).
 """
 
+import itertools
 import json
 import os
 import random
@@ -298,8 +299,9 @@ def test_object_form_arguments_match_compact_form():
 )
 def test_imported_relations_with_different_declarations_refuse(first, second):
     # Two different non-empty slot lists, or a different arity, cannot be one
-    # relation: the engine raises RelationSlotEntitiesConflict (or
-    # RelationArityConflict) when it merges such declarations.
+    # shape for the name, so compose refuses. The refusal is compose's own:
+    # namesakes from different modules get different engine relation ids
+    # (`<module>#relation.<name>`), so the engine never merges them.
     for a, b in ((first, second), (second, first)):
         with pytest.raises(ComposeError, match="declared differently") as error:
             _compose_two_declarations(a, b)
@@ -335,11 +337,12 @@ def _random_shape(rng: random.Random) -> dict:
 
 @pytest.mark.parametrize("seed", range(200))
 def test_property_namesake_relations_refuse_warn_or_pass(seed):
-    # Invariant: two same-named imported data_relations
+    # For a pair of same-named imported data_relations, with the two shapes
+    # assigned to the two modules either way round (scope order fixed):
     # - compose silently when arity and slot kinds are equal;
     # - warn when arity is equal and exactly one side is untyped;
     # - refuse otherwise (different arity, or two different typed lists).
-    # The outcome does not depend on import order.
+    # Import order over three or more modules is covered below.
     rng = random.Random(seed)
     first, second = _random_shape(rng), _random_shape(rng)
     if rng.random() < 0.25:
@@ -365,6 +368,141 @@ def test_property_namesake_relations_refuse_warn_or_pass(seed):
                 warned = any(issubclass(w.category, ComposeWarning) for w in record)
                 outcome = "warn" if warned else "pass"
         assert outcome == expected, (a, b)
+
+
+def _compose_declarations(shapes: dict[str, dict], order: list[str]):
+    """Compose one module per short name in ``shapes``, scoped in ``order``."""
+
+    modules = {
+        f"us:{short}": _relation_module(f"us:{short}", shape)
+        for short, shape in shapes.items()
+    }
+    spec = ProgramSpec.from_mapping(
+        {
+            "program": "us/example",
+            "period": "2026-01",
+            "outputs": ["member_of_household"],
+            "scope": {"federal": list(order)},
+        }
+    )
+    return compose(spec, CorpusState(modules=modules))
+
+
+def _outcome(shapes: dict[str, dict], order: list[str]):
+    """("refuse", message) or ("compose", imports, warning messages)."""
+
+    with warnings.catch_warnings(record=True) as record:
+        # "always": the default filter would drop repeated messages.
+        warnings.simplefilter("always")
+        try:
+            program = _compose_declarations(shapes, order)
+        except ComposeError as error:
+            return ("refuse", str(error))
+    messages = sorted(
+        str(w.message) for w in record if issubclass(w.category, ComposeWarning)
+    )
+    return ("compose", program.payload["imports"], messages)
+
+
+THREE_MODULES = {
+    "a": {"arity": 2, "arguments": ["Person", "Household"]},
+    "b": {"arity": 2},
+    "c": {"arity": 2, "arguments": ["Household", "Person"]},
+}
+
+
+@pytest.mark.parametrize("order", [["a", "b", "c"], ["a", "c", "b"]])
+def test_untyped_namesake_between_conflicting_typed_ones_still_refuses(order):
+    # An untyped declaration imported between two conflicting typed ones
+    # used to replace the first in scope and hide the conflict.
+    with pytest.raises(ComposeError, match="declared differently") as error:
+        _compose_declarations(THREE_MODULES, order)
+    message = str(error.value)
+    assert "us:a declares arity 2 with arguments [Person, Household]" in message
+    assert "us:c declares arity 2 with arguments [Household, Person]" in message
+
+
+def test_untyped_namesake_never_replaces_a_typed_one_in_scope():
+    # The rule in scope keeps the slot kinds whatever the import order.
+    from axiom_compose.core import _rules_in_scope
+
+    typed = {"arity": 2, "arguments": ["Person", "Household"]}
+    modules = {
+        "us:a": _relation_module("us:a", typed),
+        "us:b": _relation_module("us:b", {"arity": 2}),
+    }
+    for imports in (("us:a", "us:b"), ("us:b", "us:a")):
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", ComposeWarning)
+            scope = _rules_in_scope(imports, CorpusState(modules=modules), [])
+        assert scope["member_of_household"]["data_relation"] == typed
+
+
+NAMESAKE_SHAPES = (
+    {"arity": 2, "arguments": ["Person", "Household"]},
+    {"arity": 2, "arguments": ["Household", "Person"]},
+    {"arity": 2},
+    {"arity": 3},
+    {"arity": 3, "arguments": ["Person", "Household", "TaxUnit"]},
+)
+
+
+COMPATIBLE_SHAPES = (
+    (NAMESAKE_SHAPES[0], NAMESAKE_SHAPES[2]),
+    (NAMESAKE_SHAPES[3], NAMESAKE_SHAPES[4]),
+)
+
+
+def _refuses_as_pair(first: dict, second: dict) -> bool:
+    first_kinds = first.get("arguments", [])
+    second_kinds = second.get("arguments", [])
+    return first["arity"] != second["arity"] or (
+        bool(first_kinds and second_kinds) and first_kinds != second_kinds
+    )
+
+
+@pytest.mark.parametrize("seed", range(150))
+def test_property_namesake_outcome_is_a_function_of_the_declaration_set(seed):
+    # For three or four same-named declarations, composed in every import
+    # order:
+    # - refuse iff some pair of declarations refuses as a pair;
+    # - otherwise compose, with exactly one ComposeWarning per untyped
+    #   declaration when any declaration is typed, and none otherwise;
+    # - the refusal message, or the set of warning messages, is the same for
+    #   every order, and the composed imports follow the scope order.
+    rng = random.Random(seed)
+    count = 3 + seed % 2
+    # Two seeds in three draw from one arity's typed and untyped shape, which
+    # never refuse, so warn and pass cases are common, not just refusals.
+    pool = COMPATIBLE_SHAPES[seed % 2] if seed % 3 else NAMESAKE_SHAPES
+    shapes = {f"m{index}": dict(rng.choice(pool)) for index in range(count)}
+    declared = list(shapes.values())
+    refuses = any(
+        _refuses_as_pair(first, second)
+        for first, second in itertools.combinations(declared, 2)
+    )
+    untyped = sorted(name for name, shape in shapes.items() if "arguments" not in shape)
+    any_typed = len(untyped) < count
+
+    results = set()
+    for order in itertools.permutations(sorted(shapes)):
+        result = _outcome(shapes, list(order))
+        if refuses:
+            assert result[0] == "refuse", (shapes, order)
+            results.add(result)
+            continue
+        assert result[0] == "compose", (shapes, order, result)
+        assert result[1] == [f"us:{name}" for name in order]
+        expected_warned = untyped if any_typed else []
+        assert len(result[2]) == len(expected_warned), (shapes, order, result[2])
+        for name, message in zip(
+            expected_warned,
+            sorted(result[2], key=lambda m: m.rsplit(" in ", 1)[-1]),
+            strict=True,
+        ):
+            assert message.endswith(f"in us:{name} with the same `arguments`")
+        results.add(("compose", tuple(result[2])))
+    assert len(results) == 1, results
 
 
 # --- through the engine ---------------------------------------------------------
